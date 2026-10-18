@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
-#include <numbers>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -21,7 +20,6 @@
 
 namespace orbelio {
 namespace {
-using Vec = std::array<float, 3>;
 using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t countersBufferSizeBytes = 12;
@@ -37,10 +35,7 @@ constexpr std::size_t sortBitsMinimum = 1;
 constexpr std::size_t targetBytesPerPixel = 4;
 constexpr int timestampQueryCount = 2;
 constexpr auto telemetrySampleInterval = std::chrono::milliseconds(250);
-constexpr float verticalFieldOfViewDegrees = 25.f;
-constexpr double orbitDegreesPerSecond = 20.;
-constexpr float orbitDistanceFactor = 2.7f;
-constexpr float orbitHeightDropFactor = .10f;
+constexpr double fullTurnDegrees = 360.;
 
 // Only the legacy full-frame path plus wave partitioning; no training/HiGS pipelines.
 constexpr std::array<std::string_view, 32> rasterizerShaders = {"projection_forward",
@@ -78,22 +73,6 @@ constexpr std::array<std::string_view, 32> rasterizerShaders = {"projection_forw
 constexpr std::array<std::string_view, 3> radixSortShaders = {"upsweep_indirect",
                                                               "spine_indirect",
                                                               "downsweep_indirect"};
-
-Vec sub(const Vec& a, const Vec& b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
-
-float dot(const Vec& a, const Vec& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
-
-Vec normalize(Vec v) {
-    const float length = std::sqrt(dot(v, v));
-    for (auto& component : v) {
-        component /= length;
-    }
-    return v;
-}
-
-Vec cross(const Vec& a, const Vec& b) {
-    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
-}
 
 std::vector<std::uint32_t> readSpv(const char* path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -625,31 +604,17 @@ struct StaticGsRenderer::Impl {
         u.sort_capacity = HIGS_DEPTH_WAVE_INSTANCES;
         u.color_exposure = 1;
         u.rasterization_scale = 1;
-        u.fx = std::min(f.width, f.height) * .5f /
-               std::tan(verticalFieldOfViewDegrees * std::numbers::pi_v<float> / 180.f);
+        const auto view = cameraView(f.camera, f.width, f.height);
+        u.fx = view.focalPixels;
         u.fy = u.fx;
         u.cx = static_cast<float>(f.width) * .5f;
         u.cy = static_cast<float>(f.height) * .5f;
 
-        frame.orbitDegrees = std::fmod(f.timestampSeconds * orbitDegreesPerSecond, 360.);
-        const float angle = static_cast<float>(frame.orbitDegrees * std::numbers::pi / 180.);
-        Vec eye = scene->center;
-        const float distance = scene->radius * orbitDistanceFactor;
-        eye[0] += std::sin(angle) * distance;
-        eye[2] += std::cos(angle) * distance;
-        eye[1] -= distance * orbitHeightDropFactor;
-        const Vec forward = normalize(sub(scene->center, eye));
-        const Vec right = normalize(cross(forward, {0, -1, 0}));
-        const Vec down = cross(forward, right);
-        const Vec rows[] = {right, down, forward};
+        frame.orbitDegrees = std::fmod(f.camera.yawDegrees + fullTurnDegrees, fullTurnDegrees);
         // Upstream shader expects column-major world->camera (camera Z forward, Y down).
-        for (int row = 0; row < 3; ++row) {
-            for (int column = 0; column < 3; ++column) {
-                u.world_view_transform[column * 4 + row] = rows[row][column];
-            }
-            u.world_view_transform[12 + row] = -dot(rows[row], eye);
+        for (std::size_t index = 0; index < view.worldToCamera.size(); ++index) {
+            u.world_view_transform[index] = view.worldToCamera[index];
         }
-        u.world_view_transform[15] = 1;
         return frame;
     }
 

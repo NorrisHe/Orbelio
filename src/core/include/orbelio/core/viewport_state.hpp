@@ -8,12 +8,36 @@ namespace orbelio {
 // One owner thread mutates state; adapters must freeze it while copying a frame snapshot.
 class ViewportState {
 public:
-    void setScene(std::shared_ptr<const StaticScene> scene) { scene_ = std::move(scene); }
+    void setScene(std::shared_ptr<const StaticScene> scene) {
+        if (scene_ != scene) {
+            scene_ = std::move(scene);
+            resetCamera();
+        }
+    }
+
+    void orbitCamera(float yawDegrees, float pitchDegrees) { camera_.orbit(yawDegrees, pitchDegrees); }
+
+    void panCamera(float horizontalFraction, float verticalFraction) {
+        camera_.pan(horizontalFraction, verticalFraction);
+    }
+
+    void zoomCamera(float steps) { camera_.zoom(steps); }
+
+    void fitCamera() {
+        if (scene_) {
+            camera_.fit(scene_->center, scene_->radius);
+        }
+    }
+
+    void resetCamera() {
+        camera_.reset(scene_ ? scene_->center : std::array<float, 3>{}, scene_ ? scene_->radius : 1.f);
+    }
 
     void requestCapture(std::uint64_t requestId) { captureRequestId_ = requestId; }
 
     FrameState frame(double time, std::uint32_t width, std::uint32_t height) const {
         return {.scene = scene_,
+                .camera = camera_,
                 .captureRequestId = captureRequestId_,
                 .timestampSeconds = time,
                 .width = std::max(1u, width),
@@ -22,6 +46,7 @@ public:
 
 private:
     std::shared_ptr<const StaticScene> scene_;
+    CameraState camera_{};
     std::uint64_t captureRequestId_ = 0;
 };
 }

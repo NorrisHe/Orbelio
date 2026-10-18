@@ -5,6 +5,7 @@
 #include <optional>
 #include <memory>
 #include "static_scene.hpp"
+#include "camera.hpp"
 #include <vector>
 
 namespace orbelio {
@@ -18,6 +19,7 @@ struct FrameCapture {
 
 struct FrameState {
     std::shared_ptr<const StaticScene> scene;
+    CameraState camera{};
     std::uint64_t captureRequestId = 0; // Zero keeps viewport pixels on the GPU.
     double timestampSeconds = 0.0;
     std::uint32_t width = 1;

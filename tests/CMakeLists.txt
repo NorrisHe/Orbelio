@@ -23,3 +23,8 @@ target_link_libraries(orbelio_service_tests PRIVATE orbelio_core)
 target_compile_definitions(orbelio_service_tests PRIVATE ORBELIO_TEST_MODEL="${PROJECT_SOURCE_DIR}/samples/guitar/guitar.compressed.ply")
 add_test(NAME core.injected_services COMMAND orbelio_service_tests)
 set_tests_properties(core.injected_services PROPERTIES TIMEOUT 15)
+
+add_executable(orbelio_camera_tests camera_tests.cpp)
+target_link_libraries(orbelio_camera_tests PRIVATE orbelio_core)
+add_test(NAME core.camera_interaction COMMAND orbelio_camera_tests)
+set_tests_properties(core.camera_interaction PROPERTIES TIMEOUT 15)

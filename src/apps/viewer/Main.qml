@@ -9,15 +9,41 @@ Rectangle {
     color: "#0c1119"
     property bool playing: true
     property real sceneTime: 0
+    property bool autoOrbit: false
+    property real orbitTime: 0
+    property real previousOrbitTime: 0
+    readonly property real orbitDegreesPerSecond: 20
+    readonly property real orbitDegreesPerPixel: 0.3
+    readonly property real wheelUnitsPerStep: 120
     property double lastTick: Date.now()
     property var perf: appModel.performance
 
     onPlayingChanged: lastTick = Date.now()
+    onAutoOrbitChanged: lastTick = Date.now()
+    onOrbitTimeChanged: {
+        viewportBridge.orbitCamera((orbitTime - previousOrbitTime) * orbitDegreesPerSecond, 0)
+        previousOrbitTime = orbitTime
+    }
+
+    function fitCamera() {
+        autoOrbit = false
+        viewportBridge.fitCamera()
+    }
+
+    function resetCamera() {
+        autoOrbit = false
+        viewportBridge.resetCamera()
+    }
+
     FrameAnimation {
-        running: root.playing
+        running: root.playing || root.autoOrbit
         onTriggered: {
             const now = Date.now()
-            root.sceneTime += (now - root.lastTick) / 1000
+            const seconds = (now - root.lastTick) / 1000
+            if (root.playing)
+                root.sceneTime += seconds
+            if (root.autoOrbit)
+                root.orbitTime += seconds
             root.lastTick = now
         }
     }
@@ -44,7 +70,12 @@ Rectangle {
                     anchors.fill: parent; anchors.margins: 18; spacing: 16
                     Text { text: "SCENE"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
                     Text { text: root.perf.gaussians > 0 ? "Guitar / 3DGS" : "Loading model..."; color: "#d9e3f0"; font.pixelSize: 14 }
-                    Text { Layout.fillWidth: true; text: "PlayCanvas sample · SH0\nAutomatic orbit: 20° / s\nComplete blocking frames"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 12 }
+                    Text { Layout.fillWidth: true; text: "PlayCanvas sample · SH0\nLeft drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 12 }
+                    RowLayout {
+                        Button { objectName: "fitCameraButton"; text: "Fit"; onClicked: root.fitCamera() }
+                        Button { objectName: "resetCameraButton"; text: "Reset"; onClicked: root.resetCamera() }
+                    }
+                    CheckBox { objectName: "autoOrbitToggle"; text: "Auto orbit"; checked: root.autoOrbit; onToggled: root.autoOrbit = checked }
                     Rectangle { Layout.fillWidth: true; height: 1; color: "#263346" }
                     Text { text: "EXECUTION"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
                     Repeater {
@@ -58,7 +89,56 @@ Rectangle {
             }
             Rectangle {
                 Layout.fillWidth: true; Layout.fillHeight: true; color: "#101b29"; clip: true
-                Viewport { anchors.fill: parent; sceneTime: root.sceneTime; bridge: viewportBridge }
+                Viewport {
+                    id: viewport
+                    objectName: "viewport"
+                    anchors.fill: parent
+                    sceneTime: root.sceneTime
+                    bridge: viewportBridge
+                    Keys.onPressed: event => {
+                        if (event.key === Qt.Key_F) {
+                            root.fitCamera()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_R) {
+                            root.resetCamera()
+                            event.accepted = true
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                        property point lastPosition
+                        property bool panning: false
+                        onPressed: mouse => {
+                            viewport.forceActiveFocus()
+                            root.autoOrbit = false
+                            lastPosition = Qt.point(mouse.x, mouse.y)
+                            panning = mouse.button !== Qt.LeftButton || (mouse.modifiers & Qt.ShiftModifier) !== 0
+                        }
+                        onPositionChanged: mouse => {
+                            if (!pressed)
+                                return
+                            const dx = mouse.x - lastPosition.x
+                            const dy = mouse.y - lastPosition.y
+                            lastPosition = Qt.point(mouse.x, mouse.y)
+                            if (panning) {
+                                const extent = Math.max(1, Math.min(width, height))
+                                viewportBridge.panCamera(dx / extent, dy / extent)
+                            } else {
+                                viewportBridge.orbitCamera(-dx * root.orbitDegreesPerPixel, dy * root.orbitDegreesPerPixel)
+                            }
+                        }
+                        onDoubleClicked: root.fitCamera()
+                        onWheel: wheel => {
+                            viewport.forceActiveFocus()
+                            root.autoOrbit = false
+                            const steps = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y / root.wheelUnitsPerStep
+                                                                  : wheel.angleDelta.y / root.wheelUnitsPerStep
+                            viewportBridge.zoomCamera(steps)
+                            wheel.accepted = true
+                        }
+                    }
+                }
                 Column {
                     visible: !(root.perf.gaussians > 0)
                     anchors.centerIn: parent; spacing: 14
@@ -133,7 +213,7 @@ Rectangle {
                 Button { text: root.playing ? "Pause" : "Play"; onClicked: root.playing = !root.playing }
                 Text { text: "t = " + root.sceneTime.toFixed(3) + " s"; color: "#c9d8ea"; font.family: "Consolas"; font.pixelSize: 13 }
                 Slider { Layout.fillWidth: true; from: 0; to: 60; value: root.sceneTime % 60; onMoved: { root.playing = false; root.sceneTime = value } }
-                Text { text: "ORBIT CLOCK"; color: "#657992"; font.pixelSize: 10; font.letterSpacing: 1 }
+                Text { text: "STATIC SCENE CLOCK"; color: "#657992"; font.pixelSize: 10; font.letterSpacing: 1 }
             }
         }
     }
