@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x=8, local_size_y=8) in;
+layout(std430, binding=0) readonly buffer Pixels { vec4 pixels[]; };
+layout(rgba8, binding=1) uniform writeonly image2D target;
+layout(push_constant) uniform Params { uint width; uint height; } params;
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= params.width || p.y >= params.height) return;
+    vec4 state = pixels[p.y * params.width + p.x];
+    vec3 color = state.rgb + state.a * vec3(0.035, 0.045, 0.065);
+    imageStore(target, ivec2(p), vec4(clamp(color, 0.0, 1.0), 1.0));
+}

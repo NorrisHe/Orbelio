@@ -1,0 +1,7 @@
+add_library(orbelio_tasks STATIC io_executor.cpp gui_executor.cpp asset_reader.cpp)
+target_include_directories(orbelio_tasks PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(orbelio_tasks PUBLIC orbelio_core Qt6::Core)
+target_compile_definitions(orbelio_tasks PUBLIC QT_NO_KEYWORDS)
+add_library(orbelio_qt STATIC viewport_item.cpp viewport_bridge.cpp)
+target_include_directories(orbelio_qt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(orbelio_qt PUBLIC orbelio_tasks orbelio_vulkan_api Qt6::Quick)

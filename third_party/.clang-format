@@ -1,0 +1,3 @@
+# Copied upstream code tracked by UPSTREAM.md and import-manifest.json file hashes.
+# Formatting here would mix style churn into the local-modification record.
+DisableFormat: true

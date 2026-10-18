@@ -1,0 +1,11 @@
+{
+  "name": "orbelio",
+  "version-semver": "0.1.0",
+  "builtin-baseline": "a5f736224e85b32e25a8ffc52562333180396642",
+  "dependencies": [
+    "volk",
+    "vulkan-memory-allocator",
+    "shader-slang",
+    { "name": "tracy", "default-features": false }
+  ]
+}

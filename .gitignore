@@ -1,0 +1,21 @@
+# Local dependencies, builds and verification output
+/.tools/
+/out/
+/artifacts/
+/CMakeUserPresets.json
+/.cache/
+/compile_commands.json
+
+# IDE-local state; shared .vscode configuration remains versioned
+/.vs/
+/.idea/
+*.user
+
+# Local documentation
+/docs/
+*.md
+*.rst
+*.adoc
+*.pdf
+*.doc
+*.docx
