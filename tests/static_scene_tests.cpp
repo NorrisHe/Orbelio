@@ -59,6 +59,91 @@ constexpr std::uint32_t packedScaleAtMinimum = 0u;
 constexpr std::uint32_t packedRedWithHalfOpacity = 0xff008080u; // RGBA = ff 00 80 80
 constexpr std::string_view endHeaderLine = "end_header\n";
 constexpr float sh0RedReference = 1.77245385f;
+constexpr std::size_t framingSubjectCount = 2048;
+constexpr std::size_t framingBackgroundCount = 96;
+constexpr std::size_t framingChunkCount = 8;
+constexpr std::size_t fixtureChunkSize = 256;
+constexpr std::size_t fixtureGridSide = 16;
+constexpr std::size_t fixtureGridDepth = 8;
+constexpr std::size_t backgroundDirectionCount = 6;
+constexpr float normalizedShellOffset = .25f;
+constexpr float subjectRadiusSquared = 5.25f;
+constexpr std::uint32_t elevenBitMaximum = 2047;
+constexpr std::uint32_t tenBitMaximum = 1023;
+constexpr std::uint32_t packedHighShift = 21;
+constexpr std::uint32_t packedMiddleShift = 11;
+constexpr std::uint32_t packedOpaqueWhite = 0xffffffffu;
+constexpr std::uint32_t packedScaleAtMaximum = 0xffffffffu;
+constexpr std::array<float, 18> subjectChunkFrame =
+    {-1, -2, -.5f, 1, 2, .5f, -5, -5, -5, -5, -5, -5, 0, 0, 0, 1, 1, 1};
+constexpr std::array<float, 18> backgroundChunkFrame =
+    {-200, -200, -200, 200, 200, 200, -40, -40, -40, 0, 0, 0, 0, 0, 0, 1, 1, 1};
+
+std::uint32_t packNormalizedPosition(const std::array<float, 3>& values) {
+    return (std::uint32_t(std::round(values[0] * elevenBitMaximum)) << packedHighShift) |
+           (std::uint32_t(std::round(values[1] * tenBitMaximum)) << packedMiddleShift) |
+           std::uint32_t(std::round(values[2] * elevenBitMaximum));
+}
+
+void appendFramingVertex(std::vector<std::byte>& bytes,
+                         const std::array<float, 3>& normalizedPosition,
+                         std::uint32_t scale) {
+    append(bytes, packNormalizedPosition(normalizedPosition));
+    append(bytes, packedNearIdentityRotation);
+    append(bytes, scale);
+    append(bytes, packedOpaqueWhite);
+}
+
+void appendFramingPayload(std::vector<std::byte>& bytes, bool includeBackground) {
+    for (std::size_t index = 0; index < framingSubjectCount; ++index) {
+        appendFramingVertex(bytes,
+                            {float(index % fixtureGridSide) / (fixtureGridSide - 1),
+                             float(index / fixtureGridSide % fixtureGridSide) / (fixtureGridSide - 1),
+                             float(index / fixtureChunkSize) / (fixtureGridDepth - 1)},
+                            packedScaleAtMinimum);
+    }
+    if (!includeBackground) {
+        return;
+    }
+    for (std::size_t index = 0; index < framingBackgroundCount; ++index) {
+        std::array<float, 3> position{.5f, .5f, .5f};
+        position[index % backgroundDirectionCount / 2] +=
+            index % 2 ? normalizedShellOffset : -normalizedShellOffset;
+        appendFramingVertex(bytes, position, packedScaleAtMaximum);
+    }
+    appendFramingVertex(bytes, {1, .5f, .5f}, packedScaleAtMinimum);
+}
+
+std::vector<std::byte> buildFramingFixture(const std::vector<std::byte>& sample, bool includeBackground) {
+    const auto chunks = framingChunkCount + (includeBackground ? 1 : 0);
+    const auto count = framingSubjectCount + (includeBackground ? framingBackgroundCount + 1 : 0);
+    const std::string input(reinterpret_cast<const char*>(sample.data()), sample.size());
+    std::string header = input.substr(0, input.find(endHeaderLine) + endHeaderLine.size());
+    replaceToken(header, "element chunk 355", "element chunk " + std::to_string(chunks));
+    replaceToken(header, "element vertex 90854", "element vertex " + std::to_string(count));
+    std::vector<std::byte> bytes(header.size());
+    std::memcpy(bytes.data(), header.data(), header.size());
+    for (std::size_t index = 0; index < chunks; ++index) {
+        for (const auto value : index < framingChunkCount ? subjectChunkFrame : backgroundChunkFrame) {
+            append(bytes, std::bit_cast<std::uint32_t>(value));
+        }
+    }
+    appendFramingPayload(bytes, includeBackground);
+    return bytes;
+}
+
+void checkBackgroundDoesNotOwnFraming(const std::vector<std::byte>& bytes) {
+    const auto subject = orbelio::decodeCompressedPly(buildFramingFixture(bytes, false));
+    const auto environment = orbelio::decodeCompressedPly(buildFramingFixture(bytes, true));
+    require(std::abs(subject.radius - std::sqrt(subjectRadiusSquared)) < 1e-4f,
+            "Ordinary object framing changed");
+    require(environment.count() == framingSubjectCount + framingBackgroundCount + 1,
+            "Framing removed background Gaussians");
+    require(environment.center == subject.center && std::abs(environment.radius - subject.radius) < 1e-4f,
+            "Distant background or one degenerate Gaussian displaced the subject framing");
+    require(std::equal(subject.positions.begin(), subject.positions.end(), environment.positions.begin()),
+            "Framing changed decoded subject positions");
+}
 
 std::vector<std::byte> readSampleAsset() {
     std::ifstream file(ORBELIO_TEST_MODEL, std::ios::binary | std::ios::ate);
@@ -134,6 +219,7 @@ int main() {
     try {
         auto bytes = readSampleAsset();
         checkRealAsset(bytes);
+        checkBackgroundDoesNotOwnFraming(bytes);
         auto fixture = buildOneSplatFixture(bytes);
         checkAnalyticConventions(fixture);
         checkRejections(bytes, fixture);
