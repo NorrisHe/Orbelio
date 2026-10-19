@@ -6,6 +6,8 @@
 #include <QObject>
 #include <QVariantMap>
 #include <QString>
+#include <QUrl>
+#include <QList>
 #include <orbelio/core/performance.hpp>
 #include <map>
 #include <chrono>
@@ -18,6 +20,12 @@ class AppModel final : public QObject {
     Q_PROPERTY(bool validation READ validation CONSTANT)
     Q_PROPERTY(QString ioStatus READ ioStatus NOTIFY changed)
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY changed)
+    Q_PROPERTY(QString loadState READ loadState NOTIFY changed)
+    Q_PROPERTY(bool loading READ isLoading NOTIFY changed)
+    Q_PROPERTY(bool hasScene READ hasScene NOTIFY changed)
+    Q_PROPERTY(QString modelName READ modelName NOTIFY changed)
+    Q_PROPERTY(QString modelPath READ modelPath NOTIFY changed)
+    Q_PROPERTY(qulonglong gaussianCount READ gaussianCount NOTIFY changed)
 public:
     AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool);
 
@@ -31,18 +39,44 @@ public:
 
     QVariantMap performance() const { return performance_; }
 
+    QString loadState() const;
+
+    bool isLoading() const { return loadState_ == LoadState::Loading; }
+
+    bool hasScene() const { return viewport_.hasScene(); }
+
+    QString modelName() const { return modelName_; }
+
+    QString modelPath() const { return modelPath_; }
+
+    qulonglong gaussianCount() const { return viewport_.gaussianCount(); }
+
     void loadModel(const QString& path);
+    Q_INVOKABLE void openFiles(const QList<QUrl>& urls);
+    Q_INVOKABLE void unloadModel();
     void acceptFrame(const FrameReport& report, const QString& error);
 Q_SIGNALS:
     void sceneLoaded(double ioMilliseconds);
+    void sceneChanged();
     void changed();
 
 private:
+    enum class LoadState { Empty, Loading, Ready, Error };
+
+    struct LoadRequest {
+        std::uint64_t id = 0;
+        QString path;
+    };
+
     static constexpr unsigned warmupSceneFrames = 30;
 
     void resetMeasurements();
 
-    void completeModelLoad(SceneLoadResult result);
+    void dispatchPendingRequest();
+    void finishModelRead(const LoadRequest& request, SceneLoadResult result);
+    void completeModelLoad(const QString& path, SceneLoadResult result);
+    void failModelLoad(QString error);
+    bool finishSceneUpload(const FrameStats& frame);
 
     void addFrameSamples(const FrameStats& stats);
     void refreshPerformancePanel(const FrameReport& report);
@@ -54,6 +88,13 @@ private:
     unsigned sceneFrames_ = 0;
     QString gpuName_;
     QString ioStatus_ = "Idle";
+    QString modelName_ = "No model";
+    QString modelPath_;
+    LoadState loadState_ = LoadState::Empty;
+    std::uint64_t requestGeneration_ = 0;
+    bool readPending_ = false;
+    std::optional<LoadRequest> pendingRequest_;
+    std::optional<std::uint64_t> uploadPendingVersion_;
     bool validation_;
     SceneLoader& sceneLoader_;
     ViewportState& viewport_;

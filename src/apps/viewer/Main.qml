@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import Orbelio.Native 1.0
 
 Rectangle {
@@ -48,6 +49,17 @@ Rectangle {
         }
     }
 
+    FileDialog {
+        id: modelFileDialog
+        objectName: "modelFileDialog"
+        title: "Open a compressed SH0 PLY model"
+        nameFilters: ["PLY models (*.ply)", "All files (*)"]
+        options: FileDialog.DontUseNativeDialog
+        onAccepted: appModel.openFiles([selectedFile])
+    }
+
+    Shortcut { sequences: [StandardKey.Open]; onActivated: modelFileDialog.open() }
+
     ColumnLayout {
         anchors.fill: parent; spacing: 1
         Rectangle {
@@ -69,11 +81,20 @@ Rectangle {
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: 18; spacing: 16
                     Text { text: "SCENE"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
-                    Text { text: root.perf.gaussians > 0 ? "Guitar / 3DGS" : "Loading model..."; color: "#d9e3f0"; font.pixelSize: 14 }
-                    Text { Layout.fillWidth: true; text: "PlayCanvas sample · SH0\nLeft drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 12 }
                     RowLayout {
-                        Button { objectName: "fitCameraButton"; text: "Fit"; onClicked: root.fitCamera() }
-                        Button { objectName: "resetCameraButton"; text: "Reset"; onClicked: root.resetCamera() }
+                        Layout.fillWidth: true; spacing: 6
+                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "openModelButton"; text: "Open..."; onClicked: modelFileDialog.open() }
+                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "unloadModelButton"; text: "Unload"; enabled: appModel.hasScene || appModel.loading; onClicked: appModel.unloadModel() }
+                    }
+                    Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.modelName; elide: Text.ElideMiddle; color: "#d9e3f0"; font.pixelSize: 14 }
+                    Text { Layout.fillWidth: true; text: appModel.hasScene ? Number(appModel.gaussianCount).toLocaleString(Qt.locale(), 'f', 0) + " Gaussians · SH0" : "No scene loaded"; color: "#718299"; font.pixelSize: 12; wrapMode: Text.WordWrap }
+                    Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.loadState + " · " + appModel.ioStatus; color: appModel.loadState === "Error" ? "#ec9d91" : "#70d6bc"; font.pixelSize: 11; wrapMode: Text.WordWrap }
+                    BusyIndicator { running: appModel.loading; visible: running; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
+                    Text { Layout.fillWidth: true; text: "Compressed SH0 PLY · up to 32 MiB\nOpen a file or drop it into this window.\nLeft drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 11 }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 6
+                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "fitCameraButton"; text: "Fit"; onClicked: root.fitCamera() }
+                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "resetCameraButton"; text: "Reset"; onClicked: root.resetCamera() }
                     }
                     CheckBox { objectName: "autoOrbitToggle"; text: "Auto orbit"; checked: root.autoOrbit; onToggled: root.autoOrbit = checked }
                     Rectangle { Layout.fillWidth: true; height: 1; color: "#263346" }
@@ -82,7 +103,6 @@ Rectangle {
                         model: ["01  GUI / Main", "02  Qt Render / Engine", "03  IO / Pooled worker"]
                         delegate: Text { required property string modelData; text: modelData; color: "#b0c1d6"; font.pixelSize: 12 }
                     }
-                    Text { Layout.fillWidth: true; text: appModel.ioStatus; color: "#70d6bc"; font.pixelSize: 11; wrapMode: Text.WordWrap }
                     Item { Layout.fillHeight: true }
                     Text { Layout.fillWidth: true; text: "Temporary LichtFeld backend\nGPL-3.0-or-later · rewrite TODO"; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
                 }
@@ -140,12 +160,11 @@ Rectangle {
                     }
                 }
                 Column {
-                    visible: !(root.perf.gaussians > 0)
+                    visible: !appModel.hasScene
                     anchors.centerIn: parent; spacing: 14
                     Text { anchors.horizontalCenter: parent.horizontalCenter; text: "+"; color: "#6bbfae"; font.pixelSize: 44; font.weight: Font.Light }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Native Vulkan viewport"; color: "#c6d8e9"; font.pixelSize: 20 }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Engine VkImage → Qt Quick composition"; color: "#819ab0"; font.pixelSize: 12 }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Preparing model and compute pipelines..."; color: "#59768e"; font.pixelSize: 11 }
+                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: appModel.loading ? "Loading model..." : "Open or drop a model"; color: "#c6d8e9"; font.pixelSize: 20 }
+                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "PlayCanvas compressed SH0 PLY"; color: "#819ab0"; font.pixelSize: 12 }
                 }
                 Text { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 18; text: "VIEWPORT  /  GPU ONLY"; color: "#6d92a6"; font.pixelSize: 10; font.letterSpacing: 1 }
             }
@@ -200,7 +219,7 @@ Rectangle {
                                 Text { text: root.perf.resourceRows ? (root.perf.resourceRows[modelData] ?? "Unavailable") : "Unavailable"; color: "#cfdeed"; font.pixelSize: 10; font.family: "Consolas" }
                             }
                         }
-                        Text { Layout.fillWidth: true; text: "Owned capacities count aliases once. VMA used / reserved are allocations / blocks; Qt and driver excluded. CPU pool budget: 8 MiB. GPU budget: unavailable (not enforced)."; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
+                        Text { Layout.fillWidth: true; text: "Owned capacities count aliases once. VMA used / reserved are allocations / blocks; Qt and driver excluded. Input pool: 32 MiB. Decode limit: 128 MiB/model. GPU budget: unavailable (not enforced)."; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
                         Text { Layout.fillWidth: true; text: "Unavailable: temporal Evaluate, sequence cache, Seek-to-visible, Qt GPU composition."; wrapMode: Text.WordWrap; color: "#c6a572"; font.pixelSize: 10 }
                     }
                 }
@@ -216,5 +235,26 @@ Rectangle {
                 Text { text: "STATIC SCENE CLOCK"; color: "#657992"; font.pixelSize: 10; font.letterSpacing: 1 }
             }
         }
+    }
+
+    DropArea {
+        id: modelDrop
+        objectName: "modelDropArea"
+        anchors.fill: parent
+        onEntered: drag => { drag.accepted = drag.hasUrls }
+        onDropped: drop => {
+            if (drop.hasUrls) {
+                appModel.openFiles(drop.urls)
+                drop.acceptProposedAction()
+            }
+        }
+    }
+    Rectangle {
+        anchors.fill: parent
+        visible: modelDrop.containsDrag
+        color: "#b00c1119"
+        border.color: "#70d6bc"
+        border.width: 2
+        Text { anchors.centerIn: parent; text: "Drop one compressed SH0 PLY model"; color: "#e8eff9"; font.pixelSize: 22 }
     }
 }

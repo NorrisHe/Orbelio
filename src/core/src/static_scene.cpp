@@ -19,6 +19,9 @@ namespace {
 constexpr std::string_view endHeaderMarker = "end_header\n";
 constexpr std::size_t maxHeaderBytes = 16384;
 constexpr std::size_t maxElementCount = 2'000'000;
+constexpr std::size_t defaultDecodedByteBudget = 128 * 1024 * 1024;
+constexpr std::size_t decodedFloatsPerGaussian = 14;
+constexpr std::size_t boundsScratchFloatsPerGaussian = 1;
 constexpr std::size_t gaussiansPerChunk = 256;
 constexpr std::size_t chunkFloatCount = 18;
 constexpr std::size_t chunkBytes = chunkFloatCount * sizeof(std::uint32_t);
@@ -97,7 +100,7 @@ void readElement(std::string_view line, Header& header, std::string& element) {
     } else if (element == "vertex") {
         header.count = instances;
     } else {
-        throw std::runtime_error("This bring-up loader supports compressed SH0 PLY only");
+        throw std::runtime_error("Unsupported PLY layout: only PlayCanvas compressed SH0 PLY is supported");
     }
 }
 
@@ -250,14 +253,24 @@ void fitRobustBounds(StaticScene& scene, std::size_t count) {
 } // namespace
 
 StaticScene decodeCompressedPly(std::span<const std::byte> bytes) {
+    return decodeCompressedPly(bytes, defaultDecodedByteBudget);
+}
+
+StaticScene decodeCompressedPly(std::span<const std::byte> bytes, std::size_t maxDecodedBytes) {
     if (bytes.empty()) {
         throw std::runtime_error("Empty PLY file");
     }
     const std::string_view input(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     const auto header = readHeader(input);
+    const auto decodedBytes = (header.count * (decodedFloatsPerGaussian + boundsScratchFloatsPerGaussian) +
+                               header.chunks * chunkFloatCount) *
+                              sizeof(float);
+    if (decodedBytes > maxDecodedBytes) {
+        throw std::runtime_error("Decoded model exceeds the configured CPU memory budget");
+    }
     const auto frames = readChunkFrames(bytes, header);
 
-    StaticScene scene;
+    StaticScene scene{};
     scene.positions.resize(header.count * 3);
     scene.rotations.resize(header.count * 4);
     scene.logScales.resize(header.count * 3);

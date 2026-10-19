@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/playcanvas/engine",
+  "commit": "eddd61ea3faefec746907e4f4cf749aaa8a140d5",
+  "license": "MIT",
+  "licenseSource": "https://github.com/playcanvas/engine/blob/eddd61ea3faefec746907e4f4cf749aaa8a140d5/LICENSE",
+  "models": [
+    { "name": "guitar", "file": "guitar/guitar.compressed.ply", "bytes": 1479876, "gaussians": 90854, "shDegree": 0, "supported": true, "sha256": "04f61b72166394fdfb393dd589b0cb5a8b1b018820c73722278ddcdc2ffedc0f" },
+    { "name": "biker", "file": "biker/biker.compressed.ply", "bytes": 2487573, "gaussians": 152746, "shDegree": 0, "supported": true, "sha256": "ad906646017096ef6613cdbd1e575104e90403dc79116a9c6af749433ca1e8a1" },
+    { "name": "hotel-culpture", "file": "hotel-culpture/hotel-culpture.compressed.ply", "bytes": 16624487, "gaussians": 1021039, "shDegree": 0, "supported": true, "sha256": "0a8235ddc3d5d9368df694254e3eedd56fd73ed25579cab974f40db8ef9c3c6a" },
+    { "name": "skull", "file": "skull/skull.compressed.ply", "bytes": 15127347, "gaussians": 246821, "shDegree": 3, "supported": false, "sha256": "648530dbd6b1801d1a0db7a1cb5e39fa0880c84b9d2c65498d6a9222da4b0c86" }
+  ]
+}

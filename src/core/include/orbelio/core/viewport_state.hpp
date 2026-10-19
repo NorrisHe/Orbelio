@@ -11,9 +11,16 @@ public:
     void setScene(std::shared_ptr<const StaticScene> scene) {
         if (scene_ != scene) {
             scene_ = std::move(scene);
+            ++sceneVersion_;
             resetCamera();
         }
     }
+
+    bool hasScene() const { return static_cast<bool>(scene_); }
+
+    std::uint64_t sceneVersion() const { return sceneVersion_; }
+
+    std::size_t gaussianCount() const { return scene_ ? scene_->count() : 0; }
 
     void orbitCamera(float yawDegrees, float pitchDegrees) { camera_.orbit(yawDegrees, pitchDegrees); }
 
@@ -37,6 +44,7 @@ public:
 
     FrameState frame(double time, std::uint32_t width, std::uint32_t height) const {
         return {.scene = scene_,
+                .sceneVersion = sceneVersion_,
                 .camera = camera_,
                 .captureRequestId = captureRequestId_,
                 .timestampSeconds = time,
@@ -46,6 +54,7 @@ public:
 
 private:
     std::shared_ptr<const StaticScene> scene_;
+    std::uint64_t sceneVersion_ = 0;
     CameraState camera_{};
     std::uint64_t captureRequestId_ = 0;
 };

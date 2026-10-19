@@ -20,4 +20,5 @@ struct StaticScene {
 // PlayCanvas compressed PLY: binary little endian, 18 floats/chunk, SH0.
 // Decoding layout is derived from MIT-licensed PlayCanvas engine; see samples/guitar/README.md.
 StaticScene decodeCompressedPly(std::span<const std::byte> bytes);
+StaticScene decodeCompressedPly(std::span<const std::byte> bytes, std::size_t maxDecodedBytes);
 }

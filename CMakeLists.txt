@@ -10,7 +10,7 @@ option(ORBELIO_ENABLE_TRACY "Enable Tracy instrumentation (adds profiler helper 
 option(ORBELIO_BUILD_VIEWER "Build the Qt/Vulkan application and platform adapters" ON)
 
 if(ORBELIO_BUILD_VIEWER)
-    find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
+    find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickDialogs2)
     find_package(Vulkan 1.3 REQUIRED)
     find_package(VulkanMemoryAllocator CONFIG REQUIRED)
     find_package(volk CONFIG REQUIRED)

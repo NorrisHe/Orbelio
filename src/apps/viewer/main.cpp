@@ -1,5 +1,6 @@
 #include "app_model.hpp"
 #include "vulkan_host.hpp"
+#include "window_placement.hpp"
 #include <viewport_item.hpp>
 #include <asset_reader.hpp>
 #include <gui_executor.hpp>
@@ -65,7 +66,7 @@ void connectViewport(orbelio::AppModel& model, orbelio::ViewportBridge& bridge) 
     QObject::connect(
         &bridge, &orbelio::ViewportBridge::frameCompleted, &model, &orbelio::AppModel::acceptFrame);
     QObject::connect(
-        &model, &orbelio::AppModel::sceneLoaded, &bridge, &orbelio::ViewportBridge::requestFrame);
+        &model, &orbelio::AppModel::sceneChanged, &bridge, &orbelio::ViewportBridge::requestFrame);
 }
 
 QSize windowSize(const QQuickView& view) {
@@ -88,6 +89,7 @@ void showWindow(QQuickView& view,
     }
     view.resize(size);
     view.show();
+    orbelio::centerWindow(view);
     model.loadModel(path);
 }
 

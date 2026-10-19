@@ -16,7 +16,7 @@ struct SceneLoadResult {
 
 class SceneLoader {
 public:
-    static constexpr std::size_t modelByteBudget = 8 * 1024 * 1024;
+    static constexpr std::size_t modelByteBudget = 32 * 1024 * 1024;
     using Completion = std::function<void(SceneLoadResult)>;
 
     // Reader, pool and completion executor must outlive queued worker tasks.

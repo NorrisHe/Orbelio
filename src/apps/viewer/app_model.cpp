@@ -1,5 +1,6 @@
 #include "app_model.hpp"
 #include <QPointer>
+#include <QFileInfo>
 #include <chrono>
 
 namespace orbelio {
@@ -20,27 +21,123 @@ void AppModel::resetMeasurements() {
     sceneFrames_ = 0;
 }
 
-void AppModel::completeModelLoad(SceneLoadResult result) {
+QString AppModel::loadState() const {
+    switch (loadState_) {
+    case LoadState::Empty:
+        return "Empty";
+    case LoadState::Loading:
+        return "Loading";
+    case LoadState::Ready:
+        return "Ready";
+    case LoadState::Error:
+        return "Error";
+    }
+    return "Error";
+}
+
+void AppModel::failModelLoad(QString error) {
+    pendingRequest_.reset();
+    uploadPendingVersion_.reset();
+    loadState_ = LoadState::Error;
+    ioStatus_ = "Model error: " + error;
+    Q_EMIT changed();
+}
+
+void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
     if (result.scene) {
         resetMeasurements();
-        viewport_.setScene(result.scene);
-        ioStatus_ = QString("Loaded %1 Gaussians on pooled IO worker").arg(result.scene->count());
+        performance_.clear();
+        lastUiRefresh_ = {};
+        viewport_.setScene(std::move(result.scene));
+        modelPath_ = path;
+        modelName_ = QFileInfo(path).fileName();
+        uploadPendingVersion_ = viewport_.sceneVersion();
+        ioStatus_ = "Preparing " + modelName_ + " for display...";
         Q_EMIT sceneLoaded(result.ioMilliseconds);
+        Q_EMIT sceneChanged();
     } else {
-        ioStatus_ = "Model error: " + QString::fromStdString(result.error);
+        failModelLoad(QString::fromStdString(result.error));
+        return;
     }
     Q_EMIT changed();
 }
 
 void AppModel::loadModel(const QString& path) {
-    const QPointer<AppModel> receiver(this);
-    const bool accepted = sceneLoader_.load(path.toUtf8().toStdString(), [receiver](SceneLoadResult result) {
-        if (receiver) {
-            receiver->completeModelLoad(std::move(result));
-        }
-    });
-    ioStatus_ = accepted ? "Loading compressed PLY..." : "IO queue is busy or stopped";
+    pendingRequest_ = LoadRequest{++requestGeneration_, path};
+    uploadPendingVersion_.reset();
+    loadState_ = LoadState::Loading;
+    ioStatus_ = readPending_ ? "Waiting to load " + QFileInfo(path).fileName() + "..."
+                             : "Loading " + QFileInfo(path).fileName() + "...";
+    dispatchPendingRequest();
     Q_EMIT changed();
+}
+
+void AppModel::dispatchPendingRequest() {
+    if (readPending_ || !pendingRequest_) {
+        return;
+    }
+    const auto request = std::move(*pendingRequest_);
+    pendingRequest_.reset();
+    const QPointer<AppModel> receiver(this);
+    readPending_ = true;
+    const bool accepted =
+        sceneLoader_.load(request.path.toUtf8().toStdString(), [receiver, request](SceneLoadResult result) {
+            if (receiver) {
+                receiver->finishModelRead(request, std::move(result));
+            }
+        });
+    if (!accepted) {
+        readPending_ = false;
+        failModelLoad("IO queue is busy or stopped; try opening the file again");
+    }
+}
+
+void AppModel::finishModelRead(const LoadRequest& request, SceneLoadResult result) {
+    readPending_ = false;
+    if (request.id == requestGeneration_) {
+        completeModelLoad(request.path, std::move(result));
+    }
+    result.scene.reset();
+    dispatchPendingRequest();
+    if (loadState_ == LoadState::Empty) {
+        ioStatus_ = "No model loaded";
+        Q_EMIT changed();
+    }
+}
+
+void AppModel::openFiles(const QList<QUrl>& urls) {
+    if (urls.size() != 1 || !urls.front().isLocalFile()) {
+        ++requestGeneration_;
+        failModelLoad("Open one local compressed SH0 PLY file at a time");
+        return;
+    }
+    loadModel(urls.front().toLocalFile());
+}
+
+void AppModel::unloadModel() {
+    ++requestGeneration_;
+    pendingRequest_.reset();
+    uploadPendingVersion_.reset();
+    viewport_.setScene({});
+    modelName_ = "No model";
+    modelPath_.clear();
+    loadState_ = LoadState::Empty;
+    ioStatus_ = readPending_ ? "Unloaded; finishing an obsolete IO request" : "No model loaded";
+    resetMeasurements();
+    performance_.clear();
+    lastUiRefresh_ = {};
+    Q_EMIT sceneChanged();
+    Q_EMIT changed();
+}
+
+bool AppModel::finishSceneUpload(const FrameStats& frame) {
+    if (!uploadPendingVersion_ || *uploadPendingVersion_ != frame.sceneVersion || !frame.gaussianCount) {
+        return false;
+    }
+    uploadPendingVersion_.reset();
+    loadState_ = LoadState::Ready;
+    ioStatus_ = QString("Loaded %1 Gaussians").arg(frame.gaussianCount);
+    return true;
 }
 
 void AppModel::addFrameSamples(const FrameStats& stats) {
@@ -128,11 +225,17 @@ void AppModel::refreshPerformancePanel(const FrameReport& report) {
 
 void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
     if (!error.isEmpty()) {
+        uploadPendingVersion_.reset();
+        loadState_ = LoadState::Error;
         ioStatus_ = "Render error: " + error;
         Q_EMIT changed();
         return;
     }
     const auto& frame = report.frame;
+    if (frame.sceneVersion != viewport_.sceneVersion()) {
+        return;
+    }
+    const bool sceneBecameReady = finishSceneUpload(frame);
     if (viewportWidth_ != frame.viewportWidth || viewportHeight_ != frame.viewportHeight ||
         sceneUploads_ != frame.sceneUploads) {
         resetMeasurements();
@@ -143,7 +246,8 @@ void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
     addFrameSamples(frame);
 
     const auto now = Clock::now();
-    if (lastUiRefresh_.time_since_epoch().count() && now - lastUiRefresh_ < uiRefreshInterval) {
+    if (!sceneBecameReady && lastUiRefresh_.time_since_epoch().count() &&
+        now - lastUiRefresh_ < uiRefreshInterval) {
         return;
     }
     lastUiRefresh_ = now;

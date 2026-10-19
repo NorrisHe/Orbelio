@@ -28,6 +28,17 @@ double elapsedMs(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
+void clearSceneReport(FrameReport& report) {
+    FrameStats frame{};
+    frame.frameIndex = report.frame.frameIndex;
+    BackendStats backend{};
+    backend.imageAllocations = report.backend.imageAllocations;
+    backend.imageReservedBytes = report.backend.imageReservedBytes;
+    backend.allocatorPeakBytes = report.backend.allocatorPeakBytes;
+    report.frame = frame;
+    report.backend = backend;
+}
+
 // One image transition: the six empty pipeline-barrier arguments never vary here.
 void applyImageBarrier(VkCommandBuffer command,
                        VkPipelineStageFlags sourceStage,
@@ -259,13 +270,19 @@ void BootstrapRenderer::render(const FrameState& state) {
     }
     report_.frame.gpuWaitMs = 0;
     frameStart_ = Clock::now();
-    report_.frame.viewportWidth = state.width;
-    report_.frame.viewportHeight = state.height;
     if (state.scene) {
         renderGaussians(state);
     } else {
+        if (gs_) {
+            // The previous complete-frame fence covers both Engine and Qt use of these resources.
+            gs_.reset();
+            clearSceneReport(report_);
+        }
         renderPlaceholder(state);
     }
+    report_.frame.sceneVersion = state.sceneVersion;
+    report_.frame.viewportWidth = state.width;
+    report_.frame.viewportHeight = state.height;
 }
 
 void BootstrapRenderer::renderGaussians(const FrameState& state) {
@@ -398,7 +415,8 @@ void BootstrapRenderer::readGpuTimestamps() {
 
 void BootstrapRenderer::sampleHeapBudgets() {
     // Cached counters, no per-allocation walk. Memory display is sampled every 30 frames.
-    if (report_.frame.frameIndex != 1 && report_.frame.frameIndex % memorySampleIntervalFrames != 0) {
+    if (report_.frame.gaussianCount && report_.frame.frameIndex != 1 &&
+        report_.frame.frameIndex % memorySampleIntervalFrames != 0) {
         return;
     }
     VmaBudget heaps[VK_MAX_MEMORY_HEAPS]{};

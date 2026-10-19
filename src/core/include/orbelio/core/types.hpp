@@ -19,6 +19,7 @@ struct FrameCapture {
 
 struct FrameState {
     std::shared_ptr<const StaticScene> scene;
+    std::uint64_t sceneVersion = 0;
     CameraState camera{};
     std::uint64_t captureRequestId = 0; // Zero keeps viewport pixels on the GPU.
     double timestampSeconds = 0.0;
@@ -37,6 +38,7 @@ struct PoolStats {
 // What any renderer must report about one frame. Implementation-specific counters live with the
 // backend (src/gpu/vulkan/renderer_stats.hpp) so swapping it never touches core.
 struct FrameStats {
+    std::uint64_t sceneVersion = 0;
     std::uint64_t gaussianCount = 0;
     std::uint64_t sceneUploads = 0;
     double orbitDegrees = 0;

@@ -564,7 +564,12 @@ struct StaticGsRenderer::Impl {
         readbackCapacity = bytes;
     }
 
-    void refreshTelemetryWindow(FrameReport& report) {
+    void refreshTelemetryWindow(const std::shared_ptr<const StaticScene>& next, FrameReport& report) {
+        if (scene != next) {
+            lastCounterSample = {};
+            capture.reset();
+            report.backend.telemetryError.clear();
+        }
         const auto now = Clock::now();
         sampleCounters = lastCounterSample.time_since_epoch().count() == 0 ||
                          now - lastCounterSample >= telemetrySampleInterval;
@@ -859,7 +864,7 @@ struct StaticGsRenderer::Impl {
                 VkImageView imageView,
                 bool initialized,
                 FrameReport& report) {
-        refreshTelemetryWindow(report);
+        refreshTelemetryWindow(f.scene, report);
         resetBackendTimers();
         ensureScene(f.scene);
         resetStageTimers();
