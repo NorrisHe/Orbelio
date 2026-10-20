@@ -16,6 +16,16 @@ public:
         }
     }
 
+    void restore(const ViewportState& previous) {
+        scene_ = previous.scene_;
+        camera_ = previous.camera_;
+        ++sceneVersion_;
+    }
+
+    unsigned shDegree() const { return scene_ ? scene_->shDegree : 0; }
+
+    std::string sceneFormat() const { return scene_ ? scene_->format : std::string{}; }
+
     bool hasScene() const { return static_cast<bool>(scene_); }
 
     std::uint64_t sceneVersion() const { return sceneVersion_; }

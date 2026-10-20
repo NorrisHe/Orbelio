@@ -33,6 +33,8 @@ constexpr std::uint32_t statisticsPushBytes = 4;
 constexpr std::uint32_t composePushBytes = 8;
 constexpr std::size_t sortBitsMinimum = 1;
 constexpr std::size_t targetBytesPerPixel = 4;
+constexpr std::size_t shGroupSize = 32;
+constexpr std::size_t shVectorWidth = 4;
 constexpr int timestampQueryCount = 2;
 constexpr auto telemetrySampleInterval = std::chrono::milliseconds(250);
 constexpr double fullTurnDegrees = 360.;
@@ -519,6 +521,39 @@ struct StaticGsRenderer::Impl {
         }
     }
 
+    void uploadSphericalHarmonics(const StaticScene& next) {
+        const auto components = next.shRestCoefficients() * 3;
+        if (!components) {
+            upload(buffers.shN, std::vector<float>(shVectorWidth, 0.f));
+            return;
+        }
+        const auto slots = (components + shVectorWidth - 1) / shVectorWidth;
+        const auto groups = (next.count() + shGroupSize - 1) / shGroupSize;
+        const auto floats = groups * shGroupSize * slots * shVectorWidth;
+        auto& target = renderer.resizeDeviceBuffer(buffers.shN, floats);
+        const lfs::rendering::vulkan::DeclaredAccess access{&target,
+                                                            lfs::rendering::vulkan::BufferUse::TransferWrite};
+        renderer.planTransfer(std::span{&access, 1});
+        std::array<float, commandUpdateChunkBytes / sizeof(float)> chunk{};
+        for (std::size_t first = 0; first < floats; first += chunk.size()) {
+            const auto count = std::min(chunk.size(), floats - first);
+            for (std::size_t j = 0; j < count; ++j) {
+                const auto index = first + j;
+                const auto vector = index / shVectorWidth;
+                const auto point = vector / (slots * shGroupSize) * shGroupSize + vector % shGroupSize;
+                const auto component = vector / shGroupSize % slots * shVectorWidth + index % shVectorWidth;
+                chunk[j] = point < next.count() && component < components
+                               ? next.shRest[point * components + component]
+                               : 0.f;
+            }
+            vkCmdUpdateBuffer(renderer.activeCommandBuffer(),
+                              target.buffer,
+                              target.offset + first * sizeof(float),
+                              count * sizeof(float),
+                              chunk.data());
+        }
+    }
+
     void ensureScene(const std::shared_ptr<const StaticScene>& next) {
         if (scene == next) {
             return;
@@ -529,11 +564,11 @@ struct StaticGsRenderer::Impl {
         upload(buffers.scaling_raw, next->logScales);
         upload(buffers.opacity_raw, next->opacityLogits);
         upload(buffers.sh0, next->sh0);
-        // shN, overlays and the unused projection slots all share one zero fill.
+        // Overlays and unused projection slots share one zero fill.
         const std::vector<float> zeros(1024, 0);
         upload(dummy, zeros);
         upload(overlays, zeros);
-        upload(buffers.shN, zeros);
+        uploadSphericalHarmonics(*next);
         renderer.endCommandBatch(true);
         scene = next;
         buffers.num_splats = scene->count();
@@ -606,6 +641,10 @@ struct StaticGsRenderer::Impl {
         u.grid_height = (f.height + TILE_HEIGHT - 1) / TILE_HEIGHT;
         u.num_splats = static_cast<std::uint32_t>(scene->count());
         u.model_num_splats = u.num_splats;
+        u.active_sh = scene->shDegree;
+        u.shN_layout_slots =
+            static_cast<std::uint32_t>((scene->shRestCoefficients() * 3 + shVectorWidth - 1) / shVectorWidth);
+        u.mip_filter = scene->antialiased ? 1 : 0;
         u.sort_capacity = HIGS_DEPTH_WAVE_INSTANCES;
         u.color_exposure = 1;
         u.rasterization_scale = 1;
@@ -631,7 +670,7 @@ struct StaticGsRenderer::Impl {
             renderer.clearDeviceBuffer(tileTotals, currentTiles + tileTotalsClearMargin);
         }
 
-        // Optional upstream slots the static SH0 path does not use: per-splat transforms,
+        // Optional upstream slots the static scene path does not use: per-splat transforms,
         // node masks and LOD selection all point at the shared zero-filled `dummy` buffer.
         auto& unused = dummy.deviceBuffer;
         renderer.executeProjectionForward(u,

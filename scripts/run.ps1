@@ -1,4 +1,13 @@
-param([ValidateSet('Debug','Release')][string]$Configuration = 'Debug', [string]$Model, [switch]$Validation, [switch]$NoValidation)
+param(
+    [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
+    [string]$Model,
+    [switch]$Validation,
+    [switch]$NoValidation,
+    [ValidateRange(1,65536)][int]$InputBudgetMiB,
+    [ValidateRange(1,65536)][int]$DecodeBudgetMiB,
+    [ValidateRange(1,65536)][int]$CpuBudgetMiB,
+    [ValidateRange(1,65536)][int]$GpuBudgetMiB
+)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\env.ps1"
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -12,5 +21,16 @@ if ($Validation -or ($Configuration -eq 'Debug' -and -not $NoValidation)) {
     $taskArguments += '--validation'
 }
 if ($Model) { $taskArguments += @('--model', $Model) }
+$taskBudgetOptions = @{
+    InputBudgetMiB = '--input-budget-mib'
+    DecodeBudgetMiB = '--decode-budget-mib'
+    CpuBudgetMiB = '--cpu-budget-mib'
+    GpuBudgetMiB = '--gpu-budget-mib'
+}
+foreach ($taskBudgetName in $taskBudgetOptions.Keys) {
+    if ($PSBoundParameters.ContainsKey($taskBudgetName)) {
+        $taskArguments += @($taskBudgetOptions[$taskBudgetName], [string]$PSBoundParameters[$taskBudgetName])
+    }
+}
 & $taskExecutable @taskArguments
 if ($LASTEXITCODE -ne 0) { throw "Viewer exited with code $LASTEXITCODE" }

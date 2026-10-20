@@ -16,6 +16,28 @@ QString mebibytes(std::size_t bytes) { return QString::number(double(bytes) / me
 AppModel::AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool)
     : validation_(validation), sceneLoader_(sceneLoader), viewport_(viewport), cpuPool_(cpuPool) {}
 
+QString AppModel::budgetDescription() const {
+    const auto& limits = sceneLoader_.limits();
+    return "Input pool: " + mebibytes(limits.inputBytes) +
+           ". Decode/workspace: " + mebibytes(limits.decodedBytes) +
+           "/model. CPU scenes + queued results: " + mebibytes(limits.residentBytes) +
+           ". GPU allocations/blocks: " + mebibytes(limits.gpuBytes) + ". Qt and driver excluded.";
+}
+
+void AppModel::restoreLastScene() {
+    if (!previousScene_) {
+        return;
+    }
+    viewport_.restore(previousScene_->viewport);
+    modelPath_ = previousScene_->path;
+    modelName_ = previousScene_->name;
+    previousScene_.reset();
+    resetMeasurements();
+    performance_.clear();
+    lastUiRefresh_ = {};
+    Q_EMIT sceneChanged();
+}
+
 void AppModel::resetMeasurements() {
     metrics_.clear();
     sceneFrames_ = 0;
@@ -38,6 +60,7 @@ QString AppModel::loadState() const {
 void AppModel::failModelLoad(QString error) {
     pendingRequest_.reset();
     uploadPendingVersion_.reset();
+    restoreLastScene();
     loadState_ = LoadState::Error;
     ioStatus_ = "Model error: " + error;
     Q_EMIT changed();
@@ -45,9 +68,13 @@ void AppModel::failModelLoad(QString error) {
 
 void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
     if (result.scene) {
+        loadState_ = LoadState::Loading;
         resetMeasurements();
         performance_.clear();
         lastUiRefresh_ = {};
+        if (!previousScene_) {
+            previousScene_ = DisplayedScene{viewport_, modelPath_, modelName_};
+        }
         viewport_.setScene(std::move(result.scene));
         modelPath_ = path;
         modelName_ = QFileInfo(path).fileName();
@@ -108,7 +135,7 @@ void AppModel::finishModelRead(const LoadRequest& request, SceneLoadResult resul
 void AppModel::openFiles(const QList<QUrl>& urls) {
     if (urls.size() != 1 || !urls.front().isLocalFile()) {
         ++requestGeneration_;
-        failModelLoad("Open one local compressed SH0 PLY file at a time");
+        failModelLoad("Open one local Gaussian model at a time");
         return;
     }
     loadModel(urls.front().toLocalFile());
@@ -118,6 +145,7 @@ void AppModel::unloadModel() {
     ++requestGeneration_;
     pendingRequest_.reset();
     uploadPendingVersion_.reset();
+    previousScene_.reset();
     viewport_.setScene({});
     modelName_ = "No model";
     modelPath_.clear();
@@ -135,6 +163,7 @@ bool AppModel::finishSceneUpload(const FrameStats& frame) {
         return false;
     }
     uploadPendingVersion_.reset();
+    previousScene_.reset();
     loadState_ = LoadState::Ready;
     ioStatus_ = QString("Loaded %1 Gaussians").arg(frame.gaussianCount);
     return true;
@@ -191,8 +220,10 @@ QVariantMap AppModel::resourceRows(const BackendStats& backend) const {
     row("VMA used / reserved",
         mebibytes(backend.allocatorUsedBytes) + " / " + mebibytes(backend.allocatorReservedBytes));
     row("VMA used peak", mebibytes(backend.allocatorPeakBytes));
-    row("CPU active / reserved", mebibytes(cpu.activeBytes) + " / " + mebibytes(cpu.reservedBytes));
-    row("CPU peak / allocations", mebibytes(cpu.peakBytes) + " / " + QString::number(cpu.allocations));
+    row("CPU scenes + queued", mebibytes(sceneLoader_.residentBytes()));
+    row("GPU allocation limit", mebibytes(backend.allocatorBudgetBytes));
+    row("Input active / reserved", mebibytes(cpu.activeBytes) + " / " + mebibytes(cpu.reservedBytes));
+    row("Input peak / allocations", mebibytes(cpu.peakBytes) + " / " + QString::number(cpu.allocations));
     row("GS allocations / reuse",
         QString::number(backend.gsBufferAllocations) + " / " + QString::number(backend.gsBufferReuses));
     row("Image creates / growths",
@@ -225,7 +256,11 @@ void AppModel::refreshPerformancePanel(const FrameReport& report) {
 
 void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
     if (!error.isEmpty()) {
+        if (report.frame.sceneVersion && report.frame.sceneVersion != viewport_.sceneVersion()) {
+            return;
+        }
         uploadPendingVersion_.reset();
+        restoreLastScene();
         loadState_ = LoadState::Error;
         ioStatus_ = "Render error: " + error;
         Q_EMIT changed();

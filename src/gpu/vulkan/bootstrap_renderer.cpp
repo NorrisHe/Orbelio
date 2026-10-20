@@ -14,6 +14,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t bufferPoolBudgetBytes = 32 * 1024 * 1024;
+constexpr std::size_t hostBudgetDivisor = 5;
+constexpr std::size_t allocatorBlockDivisor = 8;
 constexpr std::size_t placeholderScratchBytes = 4096;
 constexpr std::uint32_t imageBucketPixels = 64;
 constexpr std::uint32_t imageLimitPixels = 8192;
@@ -108,9 +110,34 @@ TargetImage createTargetImage(VmaAllocator allocator,
     }
     return created;
 }
+
+std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heapBudgetLimits(DeviceContext context,
+                                                               std::size_t budgetBytes) {
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(context.physicalDevice, &properties);
+    std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> limits{};
+    std::uint32_t deviceHeaps = 0;
+    for (std::uint32_t i = 0; i < properties.memoryHeapCount; ++i) {
+        if (properties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            ++deviceHeaps;
+        }
+    }
+    const auto hostHeaps = properties.memoryHeapCount - deviceHeaps;
+    const auto hostBudget = hostHeaps && deviceHeaps ? budgetBytes / hostBudgetDivisor
+                            : hostHeaps              ? budgetBytes
+                                                     : 0;
+    const auto deviceBudget = budgetBytes - hostBudget;
+    for (std::uint32_t i = 0; i < properties.memoryHeapCount; ++i) {
+        const auto local = (properties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        limits[i] = std::min<VkDeviceSize>(properties.memoryHeaps[i].size,
+                                           local ? deviceBudget / deviceHeaps : hostBudget / hostHeaps);
+    }
+    return limits;
+}
 } // namespace
 
-BootstrapRenderer::BootstrapRenderer(DeviceContext context) : context_(context) {
+BootstrapRenderer::BootstrapRenderer(DeviceContext context, std::size_t gpuBudgetBytes)
+    : context_(context), gpuBudgetBytes_(gpuBudgetBytes) {
     try {
         createAllocator();
         buffers_ = std::make_unique<GpuBufferPool>(allocator_, bufferPoolBudgetBytes);
@@ -167,12 +194,16 @@ void BootstrapRenderer::createAllocator() {
     functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
     functions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
 
+    const auto limits = heapBudgetLimits(context_, gpuBudgetBytes_);
     VmaAllocatorCreateInfo info{};
     info.instance = context_.instance;
     info.physicalDevice = context_.physicalDevice;
     info.device = context_.device;
     info.vulkanApiVersion = VK_API_VERSION_1_3;
     info.pVulkanFunctions = &functions;
+    info.pHeapSizeLimit = limits.data();
+    info.preferredLargeHeapBlockSize =
+        std::min<VkDeviceSize>(gpuBudgetBytes_ / allocatorBlockDivisor, bufferPoolBudgetBytes);
     vkCheck(vmaCreateAllocator(&info, &allocator_), "vmaCreateAllocator");
 }
 
@@ -371,6 +402,7 @@ FrameReport BootstrapRenderer::finishFrame() {
     report_.backend.buffers = buffers_->stats();
     ++report_.frame.frameIndex;
     sampleHeapBudgets();
+    report_.backend.allocatorBudgetBytes = gpuBudgetBytes_;
 
     const auto completed = Clock::now();
     auto& frame = report_.frame;

@@ -12,7 +12,7 @@ class StaticGsRenderer;
 // Owns the native target, pooled resources and the replaceable static GS backend.
 class BootstrapRenderer final : public IVulkanRenderer {
 public:
-    explicit BootstrapRenderer(DeviceContext context);
+    explicit BootstrapRenderer(DeviceContext context, std::size_t gpuBudgetBytes = ModelLimits{}.gpuBytes);
     ~BootstrapRenderer() override;
     BootstrapRenderer(const BootstrapRenderer&) = delete;
     BootstrapRenderer& operator=(const BootstrapRenderer&) = delete;
@@ -51,6 +51,7 @@ private:
 
     RenderThreadGuard guard_;
     DeviceContext context_;
+    std::size_t gpuBudgetBytes_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     std::unique_ptr<GpuBufferPool> buffers_;
     std::unique_ptr<StaticGsRenderer> gs_;

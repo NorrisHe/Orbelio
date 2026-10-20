@@ -201,6 +201,30 @@ void admissionAndBudgetsFailWithoutPoisoningTheSession() {
     fixture.loadReady(bikerPath);
 }
 
+void failedUploadRestoresThePreviousSceneAndCamera() {
+    Fixture fixture;
+    fixture.loadReady(guitarPath);
+    fixture.viewport.orbitCamera(23.f, 7.f);
+    fixture.viewport.panCamera(.1f, .2f);
+    const auto before = fixture.viewport.frame(0, 1, 1);
+    fixture.model->loadModel(bikerPath);
+    fixture.completeRead();
+    orbelio::FrameReport failure{};
+    failure.frame.sceneVersion = fixture.viewport.sceneVersion();
+    require(fixture.model->gaussianCount() == bikerCount, "New scene was not prepared");
+    fixture.model->acceptFrame(failure, "Injected GPU allocation budget failure");
+    const auto restored = fixture.viewport.frame(0, 1, 1);
+    require(fixture.model->loadState() == "Error" && fixture.model->gaussianCount() == guitarCount &&
+                restored.scene == before.scene && restored.camera.target == before.camera.target &&
+                restored.camera.yawDegrees == before.camera.yawDegrees &&
+                restored.camera.pitchDegrees == before.camera.pitchDegrees,
+            "Failed GPU upload discarded the previous scene/camera");
+    fixture.loadReady(bikerPath);
+    fixture.model->acceptFrame(failure, "Obsolete GPU error");
+    require(fixture.model->loadState() == "Ready" && fixture.model->gaussianCount() == bikerCount,
+            "Obsolete render failure poisoned a new scene");
+}
+
 void closingDropsLateCompletions() {
     Fixture fixture;
     fixture.model->loadModel(guitarPath);
@@ -220,6 +244,7 @@ int main(int argc, char** argv) {
         unloadInvalidatesReadAndQueuedResult();
         invalidDropSupersedesLoadingAndUnicodePathsWork();
         admissionAndBudgetsFailWithoutPoisoningTheSession();
+        failedUploadRestoresThePreviousSceneAndCamera();
         closingDropsLateCompletions();
         std::cout << "Model loading, coalescing, stale frames, budgets, recovery and shutdown: PASS\n";
         return 0;

@@ -25,8 +25,31 @@ constexpr int screenMarginHeight = 100;
 
 struct Options {
     bool validation = false;
+    orbelio::ModelLimits limits{};
     QString modelPath = QStringLiteral(":/samples/guitar/guitar.compressed.ply");
 };
+
+std::size_t budgetOption(const QCommandLineParser& parser, const char* name, std::size_t fallback) {
+    if (!parser.isSet(name)) {
+        return fallback;
+    }
+    bool valid = false;
+    const auto value = parser.value(name).toULongLong(&valid);
+    constexpr auto maximumBudgetMiB = 65536;
+    if (!valid || !value || value > maximumBudgetMiB) {
+        throw std::invalid_argument(std::string(name) + " must be between 1 and 65536 MiB");
+    }
+    return static_cast<std::size_t>(value) * orbelio::ModelLimits::mebibyte;
+}
+
+orbelio::ModelLimits modelLimits(const QCommandLineParser& parser) {
+    orbelio::ModelLimits limits{};
+    limits.inputBytes = budgetOption(parser, "input-budget-mib", limits.inputBytes);
+    limits.decodedBytes = budgetOption(parser, "decode-budget-mib", limits.decodedBytes);
+    limits.residentBytes = budgetOption(parser, "cpu-budget-mib", limits.residentBytes);
+    limits.gpuBytes = budgetOption(parser, "gpu-budget-mib", limits.gpuBytes);
+    return limits;
+}
 
 Options parseOptions(QGuiApplication& app) {
     QCommandLineParser parser;
@@ -34,10 +57,16 @@ Options parseOptions(QGuiApplication& app) {
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addOption({"validation", "Require the Khronos validation layer."});
-    parser.addOption({"model", "Compressed SH0 PLY path (default: bundled PlayCanvas guitar).", "path"});
+    parser.addOption({"model", "Gaussian model path (default: bundled PlayCanvas guitar).", "path"});
+    parser.addOption({"input-budget-mib", "Input pool limit in MiB (default: 256).", "MiB"});
+    parser.addOption({"decode-budget-mib", "Per-model decode/workspace limit in MiB (default: 512).", "MiB"});
+    parser.addOption(
+        {"cpu-budget-mib", "CPU scenes and pending results limit in MiB (default: 1024).", "MiB"});
+    parser.addOption({"gpu-budget-mib", "Engine GPU allocation/block limit in MiB (default: 1024).", "MiB"});
     parser.process(app);
     Options options{};
     options.validation = parser.isSet("validation");
+    options.limits = modelLimits(parser);
     if (parser.isSet("model")) {
         options.modelPath = parser.value("model");
     }
@@ -103,11 +132,11 @@ void releaseWindow(QQuickView& view) {
 int runViewer(QGuiApplication& app, const Options& options) {
     // Declaration order guarantees: Window -> Model/IO -> Device -> Instance.
     orbelio::VulkanHost host(options.validation);
-    orbelio::BytePool cpuPool{orbelio::SceneLoader::modelByteBudget};
+    orbelio::BytePool cpuPool{options.limits.inputBytes};
     orbelio::QtAssetReader reader;
     orbelio::QtGuiExecutor completions;
-    orbelio::QtIoExecutor ioExecutor;
-    orbelio::SceneLoader loader(ioExecutor, completions, reader, cpuPool);
+    orbelio::QtIoExecutor ioExecutor(16, options.limits.inputBytes);
+    orbelio::SceneLoader loader(ioExecutor, completions, reader, cpuPool, options.limits);
     orbelio::ViewportState viewport;
     orbelio::AppModel model(host.validationEnabled(), loader, viewport, cpuPool);
     // The bridge must outlive the window's render-thread shutdown.
@@ -115,7 +144,7 @@ int runViewer(QGuiApplication& app, const Options& options) {
     QQuickView view;
     attachWindow(view, model, host);
     bridge = std::make_unique<orbelio::ViewportBridge>(
-        viewport, std::make_shared<orbelio::VulkanRendererFactory>(host.context()));
+        viewport, std::make_shared<orbelio::VulkanRendererFactory>(host.context(), options.limits.gpuBytes));
     connectViewport(model, *bridge);
     showWindow(view, model, *bridge, options.modelPath);
     const int result = app.exec();
@@ -128,8 +157,8 @@ int main(int argc, char** argv) {
     qputenv("QSG_RENDER_LOOP", "threaded");
     QGuiApplication app(argc, argv);
     configureApplication(app);
-    const auto options = parseOptions(app);
     try {
+        const auto options = parseOptions(app);
         return runViewer(app, options);
     } catch (const std::exception& error) {
         std::cerr << "Orbelio startup failed: " << error.what() << '\n';

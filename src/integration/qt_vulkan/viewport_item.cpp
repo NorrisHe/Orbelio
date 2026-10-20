@@ -46,9 +46,10 @@ private:
     }
 
     void prepare() {
-        if (failed_) {
+        if (failed_ && failedVersion_ == state_.sceneVersion) {
             return;
         }
+        failed_ = false;
         window_->beginExternalCommands();
         try {
             QThread::currentThread()->setObjectName("Orbelio.Render");
@@ -65,12 +66,25 @@ private:
             }
             rendered_ = true;
         } catch (const std::exception& error) {
-            failed_ = true;
-            markDirty(QSGNode::DirtySubtreeBlocked);
-            publish({}, error.what());
-            qCritical() << "Viewport bootstrap failed:" << error.what();
+            failFrame(error.what());
         }
         window_->endExternalCommands();
+    }
+
+    void failFrame(const char* message) {
+        failed_ = true;
+        failedVersion_ = state_.sceneVersion;
+        rendered_ = false;
+        if (renderer_) {
+            renderer_->waitIdle();
+        }
+        texture_.reset();
+        renderer_.reset();
+        markDirty(QSGNode::DirtySubtreeBlocked);
+        FrameReport report{};
+        report.frame.sceneVersion = state_.sceneVersion;
+        publish(std::move(report), message);
+        qWarning() << "Viewport frame failed:" << message;
     }
 
     void resizeTargetIfNeeded() {
@@ -105,8 +119,7 @@ private:
         try {
             publish(renderer_->finishFrame());
         } catch (const std::exception& error) {
-            failed_ = true;
-            publish({}, error.what());
+            failFrame(error.what());
         }
         rendered_ = false;
     }
@@ -119,6 +132,7 @@ private:
     std::unique_ptr<QSGTexture> texture_;
     bool rendered_ = false;
     bool failed_ = false;
+    std::uint64_t failedVersion_ = 0;
 };
 } // namespace
 

@@ -25,6 +25,9 @@ class AppModel final : public QObject {
     Q_PROPERTY(bool hasScene READ hasScene NOTIFY changed)
     Q_PROPERTY(QString modelName READ modelName NOTIFY changed)
     Q_PROPERTY(QString modelPath READ modelPath NOTIFY changed)
+    Q_PROPERTY(unsigned shDegree READ shDegree NOTIFY changed)
+    Q_PROPERTY(QString sceneFormat READ sceneFormat NOTIFY changed)
+    Q_PROPERTY(QString budgetDescription READ budgetDescription CONSTANT)
     Q_PROPERTY(qulonglong gaussianCount READ gaussianCount NOTIFY changed)
 public:
     AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool);
@@ -51,6 +54,11 @@ public:
 
     qulonglong gaussianCount() const { return viewport_.gaussianCount(); }
 
+    unsigned shDegree() const { return viewport_.shDegree(); }
+
+    QString sceneFormat() const { return QString::fromStdString(viewport_.sceneFormat()); }
+
+    QString budgetDescription() const;
     void loadModel(const QString& path);
     Q_INVOKABLE void openFiles(const QList<QUrl>& urls);
     Q_INVOKABLE void unloadModel();
@@ -76,6 +84,7 @@ private:
     void finishModelRead(const LoadRequest& request, SceneLoadResult result);
     void completeModelLoad(const QString& path, SceneLoadResult result);
     void failModelLoad(QString error);
+    void restoreLastScene();
     bool finishSceneUpload(const FrameStats& frame);
 
     void addFrameSamples(const FrameStats& stats);
@@ -93,6 +102,14 @@ private:
     LoadState loadState_ = LoadState::Empty;
     std::uint64_t requestGeneration_ = 0;
     bool readPending_ = false;
+
+    struct DisplayedScene {
+        ViewportState viewport;
+        QString path;
+        QString name;
+    };
+
+    std::optional<DisplayedScene> previousScene_;
     std::optional<LoadRequest> pendingRequest_;
     std::optional<std::uint64_t> uploadPendingVersion_;
     bool validation_;

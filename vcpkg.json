@@ -6,6 +6,11 @@
     "volk",
     "vulkan-memory-allocator",
     "shader-slang",
+    "zlib",
+    "zstd",
+    { "name": "libarchive", "default-features": false, "features": ["zstd"] },
+    { "name": "libwebp", "default-features": false },
+    "jsoncpp",
     { "name": "tracy", "default-features": false }
   ]
 }

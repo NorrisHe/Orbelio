@@ -8,7 +8,7 @@
 namespace orbelio {
 class QtIoExecutor final : public IExecutor {
 public:
-    explicit QtIoExecutor(std::size_t maxTasks = 16, std::size_t maxBytes = 64 * 1024 * 1024);
+    explicit QtIoExecutor(std::size_t maxTasks = 16, std::size_t maxBytes = 256 * 1024 * 1024);
     ~QtIoExecutor() override;
     bool tryPost(Task task, std::size_t retainedBytes = 0) override;
     void drain();

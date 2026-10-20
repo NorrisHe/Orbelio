@@ -11,6 +11,6 @@ foreach ($taskConfiguration in @('Debug','Release')) {
     & "$ValidationRoot\scripts\build.ps1" -Configuration $taskConfiguration -OrbelioRoot $taskRoot *>&1 | Tee-Object -FilePath $taskLog -Append
     & "$ValidationRoot\scripts\run.ps1" -Configuration $taskConfiguration -OrbelioRoot $taskRoot -Smoke *>&1 | Tee-Object -FilePath $taskLog -Append
     $taskValidationBuild = Join-Path $ValidationRoot "out\build\windows-$($taskConfiguration.ToLowerInvariant())"
-    ctest --test-dir $taskValidationBuild -R '^integration\.(camera|models)_vulkan$' --output-on-failure --no-tests=error *>&1 | Tee-Object -FilePath $taskLog -Append
+    ctest --test-dir $taskValidationBuild -R '^(integration\.(camera|models|formats)_vulkan|formats.conformance)$' --output-on-failure --no-tests=error *>&1 | Tee-Object -FilePath $taskLog -Append
     if ($LASTEXITCODE -ne 0) { throw 'Viewer integration tests failed' }
 }

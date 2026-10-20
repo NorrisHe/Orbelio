@@ -52,8 +52,8 @@ Rectangle {
     FileDialog {
         id: modelFileDialog
         objectName: "modelFileDialog"
-        title: "Open a compressed SH0 PLY model"
-        nameFilters: ["PLY models (*.ply)", "All files (*)"]
+        title: "Open a Gaussian model"
+        nameFilters: ["Gaussian models (*.ply *.sog *.spz *.splat *.ksplat *.json)", "PLY (*.ply)", "SOG (*.sog *.json)", "SPZ (*.spz)", "SPLAT / KSPLAT (*.splat *.ksplat)", "All files (*)"]
         options: FileDialog.DontUseNativeDialog
         onAccepted: appModel.openFiles([selectedFile])
     }
@@ -90,7 +90,7 @@ Rectangle {
                     Text { Layout.fillWidth: true; text: appModel.hasScene ? Number(appModel.gaussianCount).toLocaleString(Qt.locale(), 'f', 0) + " Gaussians · SH0" : "No scene loaded"; color: "#718299"; font.pixelSize: 12; wrapMode: Text.WordWrap }
                     Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.loadState + " · " + appModel.ioStatus; color: appModel.loadState === "Error" ? "#ec9d91" : "#70d6bc"; font.pixelSize: 11; wrapMode: Text.WordWrap }
                     BusyIndicator { running: appModel.loading; visible: running; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
-                    Text { Layout.fillWidth: true; text: "Compressed SH0 PLY · up to 32 MiB\nOpen a file or drop it into this window.\nLeft drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 11 }
+                    Text { Layout.fillWidth: true; text: "PLY / SOG / SPZ / SPLAT / KSPLAT - SH0-3\nOpen a file or drop it into this window.\nLeft drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 11 }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 6
                         Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "fitCameraButton"; text: "Fit"; onClicked: root.fitCamera() }
@@ -164,7 +164,7 @@ Rectangle {
                     anchors.centerIn: parent; spacing: 14
                     Text { anchors.horizontalCenter: parent.horizontalCenter; text: "+"; color: "#6bbfae"; font.pixelSize: 44; font.weight: Font.Light }
                     Text { anchors.horizontalCenter: parent.horizontalCenter; text: appModel.loading ? "Loading model..." : "Open or drop a model"; color: "#c6d8e9"; font.pixelSize: 20 }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "PlayCanvas compressed SH0 PLY"; color: "#819ab0"; font.pixelSize: 12 }
+                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Gaussian scene · SH0–3"; color: "#819ab0"; font.pixelSize: 12 }
                 }
                 Text { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 18; text: "VIEWPORT  /  GPU ONLY"; color: "#6d92a6"; font.pixelSize: 10; font.letterSpacing: 1 }
             }
@@ -211,7 +211,7 @@ Rectangle {
                         Repeater {
                             model: ["Model buffers", "Preprocess buffers", "Sort / tile scratch", "Pixel buffers + target",
                                     "Statistics / capture", "GS reserved / growths", "VMA used / reserved", "VMA used peak",
-                                    "CPU active / reserved", "CPU peak / allocations", "GS allocations / reuse", "Image creates / growths"]
+                                    "Input active / reserved", "Input peak / allocations", "CPU scenes + queued", "GPU allocation limit", "GS allocations / reuse", "Image creates / growths"]
                             delegate: RowLayout {
                                 required property string modelData
                                 Layout.fillWidth: true
@@ -219,7 +219,7 @@ Rectangle {
                                 Text { text: root.perf.resourceRows ? (root.perf.resourceRows[modelData] ?? "Unavailable") : "Unavailable"; color: "#cfdeed"; font.pixelSize: 10; font.family: "Consolas" }
                             }
                         }
-                        Text { Layout.fillWidth: true; text: "Owned capacities count aliases once. VMA used / reserved are allocations / blocks; Qt and driver excluded. Input pool: 32 MiB. Decode limit: 128 MiB/model. GPU budget: unavailable (not enforced)."; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
+                        Text { Layout.fillWidth: true; text: appModel.budgetDescription; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
                         Text { Layout.fillWidth: true; text: "Unavailable: temporal Evaluate, sequence cache, Seek-to-visible, Qt GPU composition."; wrapMode: Text.WordWrap; color: "#c6a572"; font.pixelSize: 10 }
                     }
                 }
@@ -255,6 +255,6 @@ Rectangle {
         color: "#b00c1119"
         border.color: "#70d6bc"
         border.width: 2
-        Text { anchors.centerIn: parent; text: "Drop one compressed SH0 PLY model"; color: "#e8eff9"; font.pixelSize: 22 }
+        Text { anchors.centerIn: parent; text: "Drop one Gaussian model"; color: "#e8eff9"; font.pixelSize: 22 }
     }
 }

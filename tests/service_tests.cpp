@@ -141,6 +141,37 @@ void rejectedWorkDoesNotRead() {
     require(rejectionReported && pool.stats().activeBytes == 0, "Completion rejection was silently lost");
 }
 
+void queuedResultsShareTheResidentBudget() {
+    MemoryReader reader;
+    orbelio::BytePool pool(orbelio::SceneLoader::modelByteBudget);
+    ManualExecutor worker;
+    ManualExecutor completions;
+    orbelio::ModelLimits limits{};
+    limits.residentBytes = 12 * orbelio::ModelLimits::mebibyte;
+    orbelio::SceneLoader loader(worker, completions, reader, pool, limits);
+    std::vector<orbelio::SceneLoadResult> results;
+    auto completion = [&](auto result) { results.push_back(std::move(result)); };
+    for (int request = 0; request < 3; ++request) {
+        require(loader.load("memory:guitar", completion), "Load rejected");
+        worker.runOne();
+    }
+    require(loader.residentBytes() > 0 && loader.residentBytes() <= limits.residentBytes,
+            "Queued results escaped the resident budget");
+    while (!completions.tasks.empty()) {
+        completions.runOne();
+    }
+    require(results.size() == 3 && results[0].scene && results[1].scene && !results[2].scene &&
+                !results[2].error.empty(),
+            "Queued result budget did not reject the third scene");
+    results.clear();
+    require(loader.residentBytes() == 0, "Delivered results leaked resident reservations");
+    require(loader.load("memory:guitar", completion), "Retry rejected");
+    worker.runOne();
+    require(loader.residentBytes() > 0, "Undelivered scene has no reservation");
+    completions.tasks.clear();
+    require(loader.residentBytes() == 0, "Dropped completion leaked its scene reservation");
+}
+
 void viewportsHaveIndependentSnapshots() {
     orbelio::ViewportState first;
     orbelio::ViewportState second;
@@ -167,6 +198,7 @@ int main() {
         deferredLoadSurvivesLoaderDestruction();
         readAndDecodeFailuresUseCompletionExecutor();
         rejectedWorkDoesNotRead();
+        queuedResultsShareTheResidentBudget();
         viewportsHaveIndependentSnapshots();
         std::cout << "Injected loading, dispatch, lifetime, failure and viewport isolation: PASS\n";
         return 0;
