@@ -1,4 +1,4 @@
-add_library(orbelio_viewer_support STATIC app_model.cpp vulkan_host.cpp)
+add_library(orbelio_viewer_support STATIC app_model.cpp vulkan_host.cpp camera_tools.cpp)
 target_include_directories(orbelio_viewer_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(orbelio_viewer_support PUBLIC orbelio_qt orbelio_vulkan Qt6::QuickControls2)
 

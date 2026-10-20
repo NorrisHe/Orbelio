@@ -17,6 +17,8 @@ constexpr float minimumDistanceFactor = .01f;
 constexpr float maximumDistanceFactor = 1000;
 constexpr float zoomExponentPerStep = .15f;
 constexpr float maximumZoomSteps = 100;
+constexpr float maximumMovementSeconds = .1f;
+constexpr float fastMovementFactor = 4;
 
 struct CameraBasis {
     std::array<float, 3> right{};
@@ -72,9 +74,41 @@ void CameraState::orbit(float yawDeltaDegrees, float pitchDeltaDegrees) {
     if (!std::isfinite(yawDeltaDegrees) || !std::isfinite(pitchDeltaDegrees)) {
         return;
     }
+    const auto previous = freeFlight ? cameraBasis(*this) : CameraBasis{};
     yawDegrees =
         std::remainder(yawDegrees + std::remainder(yawDeltaDegrees, fullTurnDegrees), fullTurnDegrees);
     pitchDegrees = std::clamp(pitchDegrees + pitchDeltaDegrees, -maximumPitchDegrees, maximumPitchDegrees);
+    if (freeFlight) {
+        const auto next = cameraBasis(*this);
+        for (std::size_t axis = 0; axis < target.size(); ++axis) {
+            target[axis] += (next.forward[axis] - previous.forward[axis]) * distance;
+        }
+    }
+}
+
+void CameraState::moveLocal(float right, float up, float forward, float seconds, bool fast) {
+    if (!freeFlight || !std::isfinite(right) || !std::isfinite(up) || !std::isfinite(forward) ||
+        !std::isfinite(seconds) || seconds <= 0) {
+        return;
+    }
+    const auto basis = cameraBasis(*this);
+    std::array<float, 3> direction{};
+    for (std::size_t axis = 0; axis < direction.size(); ++axis) {
+        direction[axis] = right * basis.right[axis] + forward * basis.forward[axis] - (axis == 1 ? up : 0.f);
+    }
+    const float length = std::hypot(direction[0], direction[1], direction[2]);
+    if (length == 0 || !std::isfinite(length)) {
+        return;
+    }
+    const float step = sceneRadius * std::clamp(seconds, 0.f, maximumMovementSeconds) *
+                       (fast ? fastMovementFactor : 1.f) / std::max(1.f, length);
+    auto next = target;
+    for (std::size_t axis = 0; axis < target.size(); ++axis) {
+        next[axis] += step * direction[axis];
+    }
+    if (std::all_of(next.begin(), next.end(), [](float value) { return std::isfinite(value); })) {
+        target = next;
+    }
 }
 
 void CameraState::pan(float horizontalFraction, float verticalFraction) {

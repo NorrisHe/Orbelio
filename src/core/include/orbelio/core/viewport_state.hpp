@@ -40,6 +40,16 @@ public:
 
     void zoomCamera(float steps) { camera_.zoom(steps); }
 
+    const CameraState& camera() const { return camera_; }
+
+    void setCamera(const CameraState& camera) { camera_ = camera; }
+
+    std::uint64_t nextCaptureRequest() {
+        captureSerial_ = std::max(captureSerial_, captureRequestId_) + 1;
+        captureRequestId_ = captureSerial_;
+        return captureRequestId_;
+    }
+
     void fitCamera() {
         if (scene_) {
             camera_.fit(scene_->center, scene_->radius);
@@ -67,5 +77,6 @@ private:
     std::uint64_t sceneVersion_ = 0;
     CameraState camera_{};
     std::uint64_t captureRequestId_ = 0;
+    std::uint64_t captureSerial_ = 0;
 };
 }

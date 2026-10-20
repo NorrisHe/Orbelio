@@ -133,6 +133,54 @@ void cameraAndSceneTimeHaveIndependentSnapshots() {
     orbelio::ViewportState other;
     require(other.frame(0, 1, 1).camera.target != initial.camera.target, "Camera leaked between viewports");
 }
+
+void freeFlightKeepsEyeAndNormalizesMovement() {
+    orbelio::CameraState camera;
+    camera.fit(sceneCenter, sceneRadius);
+    const auto initial = orbelio::cameraView(camera, viewportWidth, viewportHeight);
+    camera.freeFlight = true;
+    require(orbelio::cameraView(camera, viewportWidth, viewportHeight).eye == initial.eye,
+            "Mode switch moved the eye");
+    camera.orbit(75, 20);
+    const auto turned = orbelio::cameraView(camera, viewportWidth, viewportHeight);
+    for (std::size_t axis = 0; axis < initial.eye.size(); ++axis) {
+        require(near(initial.eye[axis], turned.eye[axis]), "Free look orbited around the target");
+    }
+    auto straight = camera;
+    auto diagonal = camera;
+    straight.moveLocal(0, 0, 1, .1f, false);
+    diagonal.moveLocal(1, 0, 1, .1f, false);
+    const auto distanceFrom = [&camera](const orbelio::CameraState& moved) {
+        return std::hypot(moved.target[0] - camera.target[0],
+                          moved.target[1] - camera.target[1],
+                          moved.target[2] - camera.target[2]);
+    };
+    require(near(distanceFrom(straight), sceneRadius * .1f) &&
+                near(distanceFrom(straight), distanceFrom(diagonal)),
+            "Movement speed depends on diagonal input");
+    auto fast = camera;
+    fast.moveLocal(0, 0, 1, 100, true);
+    require(near(distanceFrom(fast), distanceFrom(straight) * 4),
+            "Fast movement or elapsed-time clamp failed");
+    auto descending = camera;
+    descending.moveLocal(0, -1, 1, .1f, false);
+    require(distanceFrom(descending) <= sceneRadius * .1f + tolerance,
+            "Combined forward/vertical movement exceeded maximum speed");
+    const auto stable = camera;
+    camera.moveLocal(0, 1, 0, std::numeric_limits<float>::infinity(), false);
+    require(camera.target == stable.target, "Non-finite movement changed the camera");
+    camera.freeFlight = false;
+    camera.moveLocal(1, 0, 0, .1f, false);
+    require(camera.target == stable.target, "Orbit mode accepted free movement");
+}
+
+void captureRequestsStayUniqueAfterCompletion() {
+    orbelio::ViewportState viewport;
+    viewport.requestCapture(42);
+    require(viewport.nextCaptureRequest() == 43, "Capture collided with an existing request");
+    viewport.requestCapture(0);
+    require(viewport.nextCaptureRequest() == 44, "Completed capture ID was reused");
+}
 }
 
 int main() {
@@ -141,6 +189,8 @@ int main() {
         gesturesAndFitHaveSeparateResponsibilities();
         extremeGesturesRemainFinite();
         cameraAndSceneTimeHaveIndependentSnapshots();
+        freeFlightKeepsEyeAndNormalizesMovement();
+        captureRequestsStayUniqueAfterCompletion();
         std::cout << "Camera framing, gestures, limits, DPI and snapshot isolation: PASS\n";
         return 0;
     } catch (const std::exception& error) {

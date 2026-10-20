@@ -281,6 +281,7 @@ struct StaticGsRenderer::Impl {
 
     std::shared_ptr<const FrameCapture> capture;
     std::uint64_t uploads = 0;
+    std::uint64_t pixelReadbacks = 0;
 
     double gpuMs = 0;
     double backendWaitMs = 0;
@@ -802,6 +803,7 @@ struct StaticGsRenderer::Impl {
         result->rgba.assign(pixels,
                             pixels + static_cast<std::size_t>(f.width) * f.height * targetBytesPerPixel);
         capture = std::move(result);
+        ++pixelReadbacks;
     }
 
     void readTileTotals(FrameReport& report, const RasterScope& scope) {
@@ -884,6 +886,7 @@ struct StaticGsRenderer::Impl {
         backend.tileInstances = scope.references;
         backend.depthWaves = scope.waves;
         frame.sceneUploads = uploads;
+        frame.pixelReadbacks = pixelReadbacks;
         backend.gsReservedBytes =
             buffers.getTotalOwnedAllocSize() + dummy.deviceBuffer.allocSize + overlays.deviceBuffer.allocSize;
         frame.orbitDegrees = camera.orbitDegrees;

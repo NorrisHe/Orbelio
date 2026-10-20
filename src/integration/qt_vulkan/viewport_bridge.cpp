@@ -27,4 +27,20 @@ void ViewportBridge::publish(FrameReport report, std::string error) {
 }
 
 void ViewportBridge::requestFrame() { Q_EMIT frameRequested(); }
+
+void ViewportBridge::setFreeCamera(bool enabled) {
+    auto camera = state_.camera();
+    camera.freeFlight = enabled;
+    restoreCamera(camera);
+}
+
+void ViewportBridge::restoreCamera(const CameraState& camera) {
+    state_.setCamera(camera);
+    refreshCamera();
+}
+
+void ViewportBridge::refreshCamera() {
+    Q_EMIT cameraModeChanged();
+    requestFrame();
+}
 }

@@ -1,4 +1,5 @@
 #include "app_model.hpp"
+#include "camera_tools.hpp"
 #include "vulkan_host.hpp"
 #include "window_placement.hpp"
 #include <viewport_item.hpp>
@@ -95,7 +96,7 @@ void connectViewport(orbelio::AppModel& model, orbelio::ViewportBridge& bridge) 
     QObject::connect(
         &bridge, &orbelio::ViewportBridge::frameCompleted, &model, &orbelio::AppModel::acceptFrame);
     QObject::connect(
-        &model, &orbelio::AppModel::sceneChanged, &bridge, &orbelio::ViewportBridge::requestFrame);
+        &model, &orbelio::AppModel::sceneChanged, &bridge, &orbelio::ViewportBridge::refreshCamera);
 }
 
 QSize windowSize(const QQuickView& view) {
@@ -107,11 +108,13 @@ QSize windowSize(const QQuickView& view) {
 void showWindow(QQuickView& view,
                 orbelio::AppModel& model,
                 orbelio::ViewportBridge& bridge,
-                const QString& path) {
+                const QString& path,
+                orbelio::CameraTools& cameraTools) {
     const auto size = windowSize(view);
     view.resize(size);
     view.rootContext()->setContextProperty("appModel", &model);
     view.rootContext()->setContextProperty("viewportBridge", &bridge);
+    view.rootContext()->setContextProperty("cameraTools", &cameraTools);
     view.setSource(QUrl("qrc:/qt/qml/Orbelio/Main.qml"));
     if (view.status() == QQuickView::Error) {
         throw std::runtime_error("Could not load Main.qml");
@@ -141,12 +144,16 @@ int runViewer(QGuiApplication& app, const Options& options) {
     orbelio::AppModel model(host.validationEnabled(), loader, viewport, cpuPool);
     // The bridge must outlive the window's render-thread shutdown.
     std::unique_ptr<orbelio::ViewportBridge> bridge;
+    std::unique_ptr<orbelio::CameraTools> cameraTools;
     QQuickView view;
     attachWindow(view, model, host);
     bridge = std::make_unique<orbelio::ViewportBridge>(
         viewport, std::make_shared<orbelio::VulkanRendererFactory>(host.context(), options.limits.gpuBytes));
+    cameraTools = std::make_unique<orbelio::CameraTools>(viewport, *bridge, ioExecutor, completions);
+    QObject::connect(
+        &model, &orbelio::AppModel::sceneChanged, cameraTools.get(), &orbelio::CameraTools::sceneChanged);
     connectViewport(model, *bridge);
-    showWindow(view, model, *bridge, options.modelPath);
+    showWindow(view, model, *bridge, options.modelPath, *cameraTools);
     const int result = app.exec();
     releaseWindow(view);
     return result;

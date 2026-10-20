@@ -41,6 +41,7 @@ struct FrameStats {
     std::uint64_t sceneVersion = 0;
     std::uint64_t gaussianCount = 0;
     std::uint64_t sceneUploads = 0;
+    std::uint64_t pixelReadbacks = 0;
     double orbitDegrees = 0;
     std::shared_ptr<const FrameCapture> capture;
 

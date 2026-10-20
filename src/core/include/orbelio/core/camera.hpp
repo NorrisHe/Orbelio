@@ -13,12 +13,14 @@ struct CameraState {
     float pitchDegrees{};
     float verticalFieldOfViewDegrees{};
     float sceneRadius = 1;
+    bool freeFlight = false;
 
     void fit(const std::array<float, 3>& center, float radius);
     void reset(const std::array<float, 3>& center, float radius);
     void orbit(float yawDeltaDegrees, float pitchDeltaDegrees);
     void pan(float horizontalFraction, float verticalFraction);
     void zoom(float steps);
+    void moveLocal(float right, float up, float forward, float seconds, bool fast);
 };
 
 struct CameraView {

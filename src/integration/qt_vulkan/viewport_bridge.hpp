@@ -9,6 +9,7 @@
 namespace orbelio {
 class ViewportBridge final : public QObject {
     Q_OBJECT
+    Q_PROPERTY(bool freeCamera READ freeCamera WRITE setFreeCamera NOTIFY cameraModeChanged)
 public:
     ViewportBridge(ViewportState& state, std::shared_ptr<const IVulkanRendererFactory> rendererFactory);
     FrameState frame(double time, std::uint32_t width, std::uint32_t height) const;
@@ -17,6 +18,19 @@ public:
 
     void publish(FrameReport report, std::string error = {});
     void requestFrame();
+    void refreshCamera();
+
+    bool freeCamera() const { return state_.camera().freeFlight; }
+
+    void setFreeCamera(bool enabled);
+    void restoreCamera(const CameraState& camera);
+
+    Q_INVOKABLE void moveCamera(float right, float up, float forward, float seconds, bool fast) {
+        auto camera = state_.camera();
+        camera.moveLocal(right, up, forward, seconds, fast);
+        state_.setCamera(camera);
+        requestFrame();
+    }
 
     Q_INVOKABLE void orbitCamera(float yawDegrees, float pitchDegrees) {
         state_.orbitCamera(yawDegrees, pitchDegrees);
@@ -40,12 +54,13 @@ public:
 
     Q_INVOKABLE void resetCamera() {
         state_.resetCamera();
-        requestFrame();
+        refreshCamera();
     }
 
 Q_SIGNALS:
     void frameCompleted(const FrameReport& report, const QString& error);
     void frameRequested();
+    void cameraModeChanged();
 
 private:
     ViewportState& state_;

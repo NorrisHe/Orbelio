@@ -18,6 +18,52 @@ Rectangle {
     readonly property real wheelUnitsPerStep: 120
     property double lastTick: Date.now()
     property var perf: appModel.performance
+    property var heldKeys: ({})
+    readonly property bool moving: !!(heldKeys[Qt.Key_W] || heldKeys[Qt.Key_A] || heldKeys[Qt.Key_S] || heldKeys[Qt.Key_D] || heldKeys[Qt.Key_Q] || heldKeys[Qt.Key_E])
+    onMovingChanged: lastTick = Date.now()
+
+    function clearMovement() { heldKeys = ({}) }
+
+    function movementKey(event, pressed) {
+        const movement = [Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E, Qt.Key_Shift]
+        if (!viewportBridge.freeCamera || movement.indexOf(event.key) < 0)
+            return false
+        if (pressed && (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)))
+            return false
+        if (!event.isAutoRepeat) {
+            const next = Object.assign({}, heldKeys)
+            next[event.key] = pressed
+            heldKeys = next
+        }
+        event.accepted = true
+        root.autoOrbit = false
+        return true
+    }
+
+    function switchCameraMode(free) {
+        clearMovement()
+        autoOrbit = false
+        viewportBridge.freeCamera = free
+        viewport.forceActiveFocus()
+    }
+
+    function moveCamera(seconds) {
+        if (!moving || !viewport.activeFocus || !viewportBridge.freeCamera)
+            return
+        viewportBridge.moveCamera(Number(!!heldKeys[Qt.Key_D]) - Number(!!heldKeys[Qt.Key_A]),
+                                  Number(!!heldKeys[Qt.Key_E]) - Number(!!heldKeys[Qt.Key_Q]),
+                                  Number(!!heldKeys[Qt.Key_W]) - Number(!!heldKeys[Qt.Key_S]),
+                                  seconds, !!heldKeys[Qt.Key_Shift])
+    }
+
+    Connections {
+        target: root.Window.window
+        function onActiveChanged() { if (!root.Window.window.active) root.clearMovement() }
+    }
+    Connections {
+        target: viewportBridge
+        function onCameraModeChanged() { root.clearMovement() }
+    }
 
     onPlayingChanged: lastTick = Date.now()
     onAutoOrbitChanged: lastTick = Date.now()
@@ -27,17 +73,19 @@ Rectangle {
     }
 
     function fitCamera() {
+        clearMovement()
         autoOrbit = false
         viewportBridge.fitCamera()
     }
 
     function resetCamera() {
+        clearMovement()
         autoOrbit = false
         viewportBridge.resetCamera()
     }
 
     FrameAnimation {
-        running: root.playing || root.autoOrbit
+        running: root.playing || root.autoOrbit || root.moving
         onTriggered: {
             const now = Date.now()
             const seconds = (now - root.lastTick) / 1000
@@ -45,6 +93,7 @@ Rectangle {
                 root.sceneTime += seconds
             if (root.autoOrbit)
                 root.orbitTime += seconds
+            root.moveCamera(seconds)
             root.lastTick = now
         }
     }
@@ -55,7 +104,29 @@ Rectangle {
         title: "Open a Gaussian model"
         nameFilters: ["Gaussian models (*.ply *.sog *.spz *.splat *.ksplat *.json)", "PLY (*.ply)", "SOG (*.sog *.json)", "SPZ (*.spz)", "SPLAT / KSPLAT (*.splat *.ksplat)", "All files (*)"]
         options: FileDialog.DontUseNativeDialog
+        onVisibleChanged: if (visible) root.clearMovement()
         onAccepted: appModel.openFiles([selectedFile])
+    }
+
+    FileDialog {
+        id: cameraExportDialog
+        objectName: "cameraExportDialog"
+        title: "Export camera parameters"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "json"
+        nameFilters: ["Camera parameters (*.json)"]
+        options: FileDialog.DontUseNativeDialog
+        onAccepted: cameraTools.exportCamera(selectedFile)
+    }
+    FileDialog {
+        id: screenshotDialog
+        objectName: "screenshotDialog"
+        title: "Save viewport PNG"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "png"
+        nameFilters: ["PNG image (*.png)"]
+        options: FileDialog.DontUseNativeDialog
+        onAccepted: cameraTools.saveScreenshot(selectedFile)
     }
 
     Shortcut { sequences: [StandardKey.Open]; onActivated: modelFileDialog.open() }
@@ -78,33 +149,61 @@ Rectangle {
             Layout.fillWidth: true; Layout.fillHeight: true; spacing: 1
             Rectangle {
                 Layout.preferredWidth: 210; Layout.fillHeight: true; color: "#111925"
-                ColumnLayout {
-                    anchors.fill: parent; anchors.margins: 18; spacing: 16
-                    Text { text: "SCENE"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
-                    RowLayout {
-                        Layout.fillWidth: true; spacing: 6
-                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "openModelButton"; text: "Open..."; onClicked: modelFileDialog.open() }
-                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "unloadModelButton"; text: "Unload"; enabled: appModel.hasScene || appModel.loading; onClicked: appModel.unloadModel() }
+                ScrollView {
+                    anchors.fill: parent; anchors.margins: 14; clip: true
+                    contentWidth: availableWidth
+                    ColumnLayout {
+                        width: parent.width; spacing: 8
+                        Text { text: "SCENE"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 6
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "openModelButton"; text: "Open..."; onClicked: modelFileDialog.open() }
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "unloadModelButton"; text: "Unload"; enabled: appModel.hasScene || appModel.loading; onClicked: appModel.unloadModel() }
+                        }
+                        Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.modelName; elide: Text.ElideMiddle; color: "#d9e3f0"; font.pixelSize: 14 }
+                        Text { Layout.fillWidth: true; text: appModel.hasScene ? Number(appModel.gaussianCount).toLocaleString(Qt.locale(), 'f', 0) + " Gaussians · SH" + appModel.shDegree : "No scene loaded"; color: "#718299"; font.pixelSize: 12; wrapMode: Text.WordWrap }
+                        Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.loadState + " · " + appModel.ioStatus; color: appModel.loadState === "Error" ? "#ec9d91" : "#70d6bc"; font.pixelSize: 11; wrapMode: Text.WordWrap }
+                        BusyIndicator { running: appModel.loading; visible: running; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
+                        Text { Layout.fillWidth: true; text: viewportBridge.freeCamera ? "Click viewport: focus\nWASD: move · Q/E: down/up\nShift: fast · Left/right drag: look\nMiddle / Shift+left: pan\nV: orbit · Esc: release keys" : "Left drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset · V: free camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 11 }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 6
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "fitCameraButton"; text: "Fit"; onClicked: root.fitCamera() }
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "resetCameraButton"; text: "Reset"; onClicked: root.resetCamera() }
+                        }
+                        ComboBox {
+                            Layout.fillWidth: true; objectName: "cameraModeSelector"
+                            model: ["Orbit", "Free / WASD"]
+                            currentIndex: viewportBridge.freeCamera ? 1 : 0
+                            onActivated: root.switchCameraMode(currentIndex === 1)
+                        }
+                        CheckBox { objectName: "autoOrbitToggle"; text: "Auto orbit"; enabled: !viewportBridge.freeCamera; checked: root.autoOrbit; onToggled: root.autoOrbit = checked }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 6
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "saveBookmarkButton"; text: "Bookmark"; enabled: appModel.hasScene && cameraTools.bookmarks.length < 16; onClicked: { cameraTools.saveBookmark(); bookmarkSelector.currentIndex = cameraTools.bookmarks.length - 1 } }
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "restoreBookmarkButton"; text: "Restore"; enabled: bookmarkSelector.currentIndex >= 0; onClicked: { root.autoOrbit = false; cameraTools.restoreBookmark(bookmarkSelector.currentIndex) } }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 6
+                            ComboBox { id: bookmarkSelector; objectName: "bookmarkSelector"; Layout.fillWidth: true; Layout.minimumWidth: 0; model: cameraTools.bookmarks }
+                            Button { Layout.preferredWidth: 28; Layout.minimumWidth: 28; text: "×"; objectName: "removeBookmarkButton"; enabled: bookmarkSelector.currentIndex >= 0; onClicked: cameraTools.removeBookmark(bookmarkSelector.currentIndex) }
+                        }
+                        Text { Layout.fillWidth: true; text: "Scene bookmarks · session only"; color: "#718299"; font.pixelSize: 10 }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 6
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "exportCameraButton"; text: "JSON..."; ToolTip.visible: hovered; ToolTip.text: "Export camera parameters"; enabled: appModel.hasScene && !cameraTools.busy; onClicked: { root.clearMovement(); cameraExportDialog.open() } }
+                            Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "saveScreenshotButton"; text: "Screenshot"; enabled: appModel.hasScene && !cameraTools.busy; onClicked: { root.clearMovement(); screenshotDialog.open() } }
+                        }
+                        Text { Layout.fillWidth: true; text: cameraTools.screenshotSize; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 10 }
+                        Text { Layout.fillWidth: true; text: cameraTools.status; wrapMode: Text.WordWrap; color: "#70d6bc"; font.pixelSize: 10 }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: "#263346" }
+                        Text { text: "EXECUTION"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
+                        Repeater {
+                            model: ["01  GUI / Main", "02  Qt Render / Engine", "03  IO / Pooled worker"]
+                            delegate: Text { required property string modelData; text: modelData; color: "#b0c1d6"; font.pixelSize: 12 }
+                        }
+                        Item { Layout.fillHeight: true }
+                        Text { Layout.fillWidth: true; text: "Temporary LichtFeld backend\nGPL-3.0-or-later · rewrite TODO"; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
                     }
-                    Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.modelName; elide: Text.ElideMiddle; color: "#d9e3f0"; font.pixelSize: 14 }
-                    Text { Layout.fillWidth: true; text: appModel.hasScene ? Number(appModel.gaussianCount).toLocaleString(Qt.locale(), 'f', 0) + " Gaussians · SH0" : "No scene loaded"; color: "#718299"; font.pixelSize: 12; wrapMode: Text.WordWrap }
-                    Text { Layout.fillWidth: true; Layout.minimumWidth: 0; text: appModel.loadState + " · " + appModel.ioStatus; color: appModel.loadState === "Error" ? "#ec9d91" : "#70d6bc"; font.pixelSize: 11; wrapMode: Text.WordWrap }
-                    BusyIndicator { running: appModel.loading; visible: running; Layout.preferredWidth: 24; Layout.preferredHeight: 24 }
-                    Text { Layout.fillWidth: true; text: "PLY / SOG / SPZ / SPLAT / KSPLAT - SH0-3\nOpen a file or drop it into this window.\nLeft drag: orbit\nRight / middle / Shift+left: pan\nWheel: zoom · Double-click / F: fit\nR: reset camera"; wrapMode: Text.WordWrap; color: "#718299"; font.pixelSize: 11 }
-                    RowLayout {
-                        Layout.fillWidth: true; spacing: 6
-                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "fitCameraButton"; text: "Fit"; onClicked: root.fitCamera() }
-                        Button { Layout.fillWidth: true; Layout.minimumWidth: 0; objectName: "resetCameraButton"; text: "Reset"; onClicked: root.resetCamera() }
-                    }
-                    CheckBox { objectName: "autoOrbitToggle"; text: "Auto orbit"; checked: root.autoOrbit; onToggled: root.autoOrbit = checked }
-                    Rectangle { Layout.fillWidth: true; height: 1; color: "#263346" }
-                    Text { text: "EXECUTION"; color: "#8c9bb0"; font.pixelSize: 11; font.letterSpacing: 2 }
-                    Repeater {
-                        model: ["01  GUI / Main", "02  Qt Render / Engine", "03  IO / Pooled worker"]
-                        delegate: Text { required property string modelData; text: modelData; color: "#b0c1d6"; font.pixelSize: 12 }
-                    }
-                    Item { Layout.fillHeight: true }
-                    Text { Layout.fillWidth: true; text: "Temporary LichtFeld backend\nGPL-3.0-or-later · rewrite TODO"; wrapMode: Text.WordWrap; color: "#657992"; font.pixelSize: 10 }
                 }
             }
             Rectangle {
@@ -115,8 +214,25 @@ Rectangle {
                     anchors.fill: parent
                     sceneTime: root.sceneTime
                     bridge: viewportBridge
+                    onActiveFocusChanged: if (!activeFocus) root.clearMovement()
+                    Keys.onReleased: event => root.movementKey(event, false)
                     Keys.onPressed: event => {
-                        if (event.key === Qt.Key_F) {
+                        if (root.movementKey(event, true))
+                            return
+                        if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+                            return
+                        if (event.isAutoRepeat) {
+                            event.accepted = true
+                            return
+                        }
+                        if (event.key === Qt.Key_V) {
+                            root.switchCameraMode(!viewportBridge.freeCamera)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Escape) {
+                            root.clearMovement()
+                            focus = false
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_F) {
                             root.fitCamera()
                             event.accepted = true
                         } else if (event.key === Qt.Key_R) {
@@ -133,7 +249,7 @@ Rectangle {
                             viewport.forceActiveFocus()
                             root.autoOrbit = false
                             lastPosition = Qt.point(mouse.x, mouse.y)
-                            panning = mouse.button !== Qt.LeftButton || (mouse.modifiers & Qt.ShiftModifier) !== 0
+                            panning = mouse.button === Qt.MiddleButton || (mouse.button === Qt.RightButton && !viewportBridge.freeCamera) || (mouse.button === Qt.LeftButton && (mouse.modifiers & Qt.ShiftModifier) !== 0)
                         }
                         onPositionChanged: mouse => {
                             if (!pressed)
