@@ -1,0 +1,67 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Windows Debug and Release
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg-binaries
+      VCPKG_DOWNLOADS: ${{ github.workspace }}/.cache/vcpkg-downloads
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up MSYS2 UCRT64
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+
+      - name: Cache dependency downloads and compiled libraries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .cache/vcpkg-binaries
+            .cache/vcpkg-downloads
+          key: windows-ucrt64-vcpkg-${{ hashFiles('vcpkg.json') }}
+
+      - name: Install build dependencies
+        run: |
+          New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:VCPKG_DOWNLOADS -Force | Out-Null
+          ./scripts/install-environment.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -Environment ucrt64
+
+      - name: Check C++ formatting
+        run: |
+          . ./scripts/env.ps1 -MingwRoot (Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'ucrt64')
+          ./scripts/format.ps1 -Check
+
+      - name: Build and test Debug
+        run: |
+          . ./scripts/env.ps1 -MingwRoot (Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'ucrt64')
+          ./scripts/build.ps1 -Configuration Debug -Test
+
+      - name: Build and test Release
+        run: |
+          . ./scripts/env.ps1 -MingwRoot (Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'ucrt64')
+          ./scripts/build.ps1 -Configuration Release -Test
