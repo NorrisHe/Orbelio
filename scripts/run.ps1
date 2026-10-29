@@ -6,7 +6,10 @@ param(
     [ValidateRange(1,65536)][int]$InputBudgetMiB,
     [ValidateRange(1,65536)][int]$DecodeBudgetMiB,
     [ValidateRange(1,65536)][int]$CpuBudgetMiB,
-    [ValidateRange(1,65536)][int]$GpuBudgetMiB
+    [ValidateRange(1,65536)][int]$GpuBudgetMiB,
+    [ValidateRange(1,65536)][int]$SequenceCacheMiB,
+    [ValidateRange(0,8000000)][int]$SplatBudget,
+    [ValidateRange(0,8000000)][int]$UploadGaussiansPerFrame
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\env.ps1"
@@ -26,6 +29,9 @@ $taskBudgetOptions = @{
     DecodeBudgetMiB = '--decode-budget-mib'
     CpuBudgetMiB = '--cpu-budget-mib'
     GpuBudgetMiB = '--gpu-budget-mib'
+    SequenceCacheMiB = '--sequence-cache-mib'
+    SplatBudget = '--splat-budget'
+    UploadGaussiansPerFrame = '--upload-gaussians-per-frame'
 }
 foreach ($taskBudgetName in $taskBudgetOptions.Keys) {
     if ($PSBoundParameters.ContainsKey($taskBudgetName)) {

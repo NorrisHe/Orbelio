@@ -93,5 +93,6 @@ struct ModelLimits {
     std::size_t residentBytes = 1024 * mebibyte;
     std::size_t gpuBytes = 1024 * mebibyte;
     std::size_t maxGaussians = 8'000'000;
+    std::size_t sequenceCacheBytes = 256 * mebibyte;
 };
 }

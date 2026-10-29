@@ -14,7 +14,11 @@ QString mebibytes(std::size_t bytes) { return QString::number(double(bytes) / me
 } // namespace
 
 AppModel::AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool)
-    : validation_(validation), sceneLoader_(sceneLoader), viewport_(viewport), cpuPool_(cpuPool) {}
+    : validation_(validation), sceneLoader_(sceneLoader), viewport_(viewport), cpuPool_(cpuPool),
+      sequencePlayer_(sceneLoader, viewport, this) {
+    connect(&sequencePlayer_, &SequencePlayer::frameRequested, this, &AppModel::frameRequested);
+    connect(&sequencePlayer_, &SequencePlayer::frameRequested, this, &AppModel::changed);
+}
 
 QString AppModel::budgetDescription() const {
     const auto& limits = sceneLoader_.limits();
@@ -28,10 +32,12 @@ void AppModel::restoreLastScene() {
     if (!previousScene_) {
         return;
     }
-    viewport_.restore(previousScene_->viewport);
+    viewport_.restoreContent(previousScene_->content);
+    viewport_.setCamera(previousScene_->camera);
     modelPath_ = previousScene_->path;
     modelName_ = previousScene_->name;
     previousScene_.reset();
+    sequencePlayer_.resume();
     resetMeasurements();
     performance_.clear();
     lastUiRefresh_ = {};
@@ -41,6 +47,31 @@ void AppModel::restoreLastScene() {
 void AppModel::resetMeasurements() {
     metrics_.clear();
     sceneFrames_ = 0;
+}
+
+void AppModel::setRenderSettings(RenderSettings settings) {
+    if (settings == viewport_.renderSettings()) {
+        return;
+    }
+    viewport_.setRenderSettings(settings);
+    resetMeasurements();
+    performance_.clear();
+    lastUiRefresh_ = {};
+    Q_EMIT renderSettingsChanged();
+    Q_EMIT changed();
+    Q_EMIT frameRequested();
+}
+
+void AppModel::setMaxGaussians(int value) {
+    auto settings = viewport_.renderSettings();
+    settings.maxGaussians = std::clamp(value, 0, int(ModelLimits{}.maxGaussians));
+    setRenderSettings(settings);
+}
+
+void AppModel::setUploadGaussiansPerFrame(int value) {
+    auto settings = viewport_.renderSettings();
+    settings.uploadGaussiansPerFrame = std::clamp(value, 0, int(ModelLimits{}.maxGaussians));
+    setRenderSettings(settings);
 }
 
 QString AppModel::loadState() const {
@@ -60,6 +91,7 @@ QString AppModel::loadState() const {
 void AppModel::failModelLoad(QString error) {
     pendingRequest_.reset();
     uploadPendingVersion_.reset();
+    pendingSequence_.reset();
     restoreLastScene();
     loadState_ = LoadState::Error;
     ioStatus_ = "Model error: " + error;
@@ -67,15 +99,25 @@ void AppModel::failModelLoad(QString error) {
 }
 
 void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
-    if (result.scene) {
+    if (result.scene || result.fdu4d) {
+        sequencePlayer_.suspend();
         loadState_ = LoadState::Loading;
         resetMeasurements();
         performance_.clear();
         lastUiRefresh_ = {};
         if (!previousScene_) {
-            previousScene_ = DisplayedScene{viewport_, modelPath_, modelName_};
+            previousScene_ = DisplayedScene{viewport_.content(), viewport_.camera(), modelPath_, modelName_};
         }
-        viewport_.setScene(std::move(result.scene));
+        if (result.fdu4d) {
+            viewport_.setFdu4d(std::move(result.fdu4d));
+        } else {
+            viewport_.setScene(std::move(result.scene));
+        }
+        pendingSequence_ = std::move(result.sequence);
+        if (pendingSequence_) {
+            viewport_.setSequenceFrame(viewport_.content().scene,
+                                       pendingSequence_->frames.front().timestampSeconds);
+        }
         modelPath_ = path;
         modelName_ = QFileInfo(path).fileName();
         uploadPendingVersion_ = viewport_.sceneVersion();
@@ -90,6 +132,7 @@ void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
 }
 
 void AppModel::loadModel(const QString& path) {
+    sequencePlayer_.setPlaying(false);
     pendingRequest_ = LoadRequest{++requestGeneration_, path};
     uploadPendingVersion_.reset();
     loadState_ = LoadState::Loading;
@@ -125,6 +168,8 @@ void AppModel::finishModelRead(const LoadRequest& request, SceneLoadResult resul
         completeModelLoad(request.path, std::move(result));
     }
     result.scene.reset();
+    result.fdu4d.reset();
+    result.sequence.reset();
     dispatchPendingRequest();
     if (loadState_ == LoadState::Empty) {
         ioStatus_ = "No model loaded";
@@ -142,6 +187,8 @@ void AppModel::openFiles(const QList<QUrl>& urls) {
 }
 
 void AppModel::unloadModel() {
+    sequencePlayer_.clear();
+    pendingSequence_.reset();
     ++requestGeneration_;
     pendingRequest_.reset();
     uploadPendingVersion_.reset();
@@ -159,13 +206,19 @@ void AppModel::unloadModel() {
 }
 
 bool AppModel::finishSceneUpload(const FrameStats& frame) {
-    if (!uploadPendingVersion_ || *uploadPendingVersion_ != frame.sceneVersion || !frame.gaussianCount) {
+    if (!uploadPendingVersion_ || *uploadPendingVersion_ != frame.sceneVersion || !frame.gaussianCount ||
+        frame.refining) {
         return false;
     }
     uploadPendingVersion_.reset();
     previousScene_.reset();
     loadState_ = LoadState::Ready;
     ioStatus_ = QString("Loaded %1 Gaussians").arg(frame.gaussianCount);
+    if (viewport_.content().fdu4d) {
+        sequencePlayer_.activateFdu4d(viewport_.content().fdu4d);
+    } else {
+        sequencePlayer_.activate(std::move(pendingSequence_), viewport_.content().scene);
+    }
     return true;
 }
 
@@ -193,6 +246,7 @@ void AppModel::addFrameSamples(const FrameStats& stats) {
     add("gpuRasterAndTileSortMs", stats.rasterGpuMs);
     add("gpuImageComposeMs", stats.composeGpuMs);
     add("gpuGsStagesMs", stats.gpuRenderMs);
+    add("temporalEvaluationCpuMs", stats.temporalEvaluationCpuMs);
 }
 
 QVariantMap AppModel::timingRows() const {
@@ -252,14 +306,27 @@ void AppModel::refreshPerformancePanel(const FrameReport& report) {
     performance_["maxTile"] =
         backend.maxTileList ? QVariant::fromValue<qulonglong>(*backend.maxTileList) : QVariant();
     performance_["resourceRows"] = resourceRows(backend);
+    performance_["submittedGaussians"] = QVariant::fromValue<qulonglong>(frame.submittedGaussians);
+    performance_["budgetedGaussians"] = QVariant::fromValue<qulonglong>(frame.budgetedGaussians);
+    performance_["refining"] = frame.refining;
 }
 
 void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
+    const auto generation = requestGeneration_;
+    const auto sequenceFrame = sequencePlayer_.acceptFrame(report.frame, error);
+    if (generation != requestGeneration_) {
+        return;
+    }
+    if (sequenceFrame == SequencePlayer::FrameAcceptance::FailedConsumed) {
+        Q_EMIT changed();
+        return;
+    }
     if (!error.isEmpty()) {
         if (report.frame.sceneVersion && report.frame.sceneVersion != viewport_.sceneVersion()) {
             return;
         }
         uploadPendingVersion_.reset();
+        pendingSequence_.reset();
         restoreLastScene();
         loadState_ = LoadState::Error;
         ioStatus_ = "Render error: " + error;
@@ -267,27 +334,31 @@ void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
         return;
     }
     const auto& frame = report.frame;
-    if (frame.sceneVersion != viewport_.sceneVersion()) {
+    if (sequenceFrame != SequencePlayer::FrameAcceptance::Committed &&
+        frame.sceneVersion != viewport_.sceneVersion()) {
         return;
     }
     const bool sceneBecameReady = finishSceneUpload(frame);
-    if (viewportWidth_ != frame.viewportWidth || viewportHeight_ != frame.viewportHeight ||
-        sceneUploads_ != frame.sceneUploads) {
+    if (generation != requestGeneration_) {
+        return;
+    }
+    if (viewportWidth_ != frame.viewportWidth || viewportHeight_ != frame.viewportHeight) {
         resetMeasurements();
     }
     viewportWidth_ = frame.viewportWidth;
     viewportHeight_ = frame.viewportHeight;
-    sceneUploads_ = frame.sceneUploads;
     addFrameSamples(frame);
-
     const auto now = Clock::now();
-    if (!sceneBecameReady && lastUiRefresh_.time_since_epoch().count() &&
-        now - lastUiRefresh_ < uiRefreshInterval) {
+    if (!sceneBecameReady && !frame.refining && !performance_.value("refining").toBool() &&
+        lastUiRefresh_.time_since_epoch().count() && now - lastUiRefresh_ < uiRefreshInterval) {
         return;
     }
     lastUiRefresh_ = now;
     refreshPerformancePanel(report);
     Q_EMIT changed();
+    if (frame.refining && generation == requestGeneration_) {
+        Q_EMIT frameRequested();
+    }
 }
 
 } // namespace orbelio

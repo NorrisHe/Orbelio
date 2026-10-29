@@ -269,6 +269,8 @@ struct StaticGsRenderer::Impl {
     Clock::time_point lastCounterSample;
 
     std::shared_ptr<const StaticScene> scene;
+    std::size_t targetGaussians = 0;
+    std::size_t uploadedGaussians = 0;
 
     VkDescriptorSetLayout descriptors = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -522,30 +524,65 @@ struct StaticGsRenderer::Impl {
         }
     }
 
-    void uploadSphericalHarmonics(const StaticScene& next) {
+    auto& transferTarget(Buffer<float>& destination, std::size_t floats) {
+        auto& target = renderer.resizeDeviceBuffer(destination, floats);
+        const lfs::rendering::vulkan::DeclaredAccess access{&target,
+                                                            lfs::rendering::vulkan::BufferUse::TransferWrite};
+        renderer.planTransfer(std::span{&access, 1});
+        return target;
+    }
+
+    void uploadAttributes(Buffer<float>& destination,
+                          const std::vector<float>& source,
+                          std::size_t components,
+                          std::size_t end) {
+        auto& target = transferTarget(destination, targetGaussians * components);
+        std::array<float, commandUpdateChunkBytes / sizeof(float)> chunk{};
+        const auto pointsPerChunk = chunk.size() / components;
+        for (auto first = uploadedGaussians; first < end; first += pointsPerChunk) {
+            const auto points = std::min(pointsPerChunk, end - first);
+            const float* data = source.data() + first * components;
+            if (targetGaussians != scene->count()) {
+                for (std::size_t index = 0; index < points; ++index) {
+                    const auto point = sampledGaussian(first + index, scene->count(), targetGaussians);
+                    std::copy_n(
+                        source.data() + point * components, components, chunk.data() + index * components);
+                }
+                data = chunk.data();
+            }
+            vkCmdUpdateBuffer(renderer.activeCommandBuffer(),
+                              target.buffer,
+                              target.offset + first * components * sizeof(float),
+                              points * components * sizeof(float),
+                              data);
+        }
+    }
+
+    void uploadSphericalHarmonics(const StaticScene& next, std::size_t end) {
         const auto components = next.shRestCoefficients() * 3;
         if (!components) {
             upload(buffers.shN, std::vector<float>(shVectorWidth, 0.f));
             return;
         }
         const auto slots = (components + shVectorWidth - 1) / shVectorWidth;
-        const auto groups = (next.count() + shGroupSize - 1) / shGroupSize;
+        const auto groups = (targetGaussians + shGroupSize - 1) / shGroupSize;
         const auto floats = groups * shGroupSize * slots * shVectorWidth;
-        auto& target = renderer.resizeDeviceBuffer(buffers.shN, floats);
-        const lfs::rendering::vulkan::DeclaredAccess access{&target,
-                                                            lfs::rendering::vulkan::BufferUse::TransferWrite};
-        renderer.planTransfer(std::span{&access, 1});
+        auto& target = transferTarget(buffers.shN, floats);
+        const auto firstFloat = uploadedGaussians / shGroupSize * shGroupSize * slots * shVectorWidth;
+        const auto lastFloat = (end + shGroupSize - 1) / shGroupSize * shGroupSize * slots * shVectorWidth;
         std::array<float, commandUpdateChunkBytes / sizeof(float)> chunk{};
-        for (std::size_t first = 0; first < floats; first += chunk.size()) {
-            const auto count = std::min(chunk.size(), floats - first);
+        for (auto first = firstFloat; first < lastFloat; first += chunk.size()) {
+            const auto count = std::min(chunk.size(), lastFloat - first);
             for (std::size_t j = 0; j < count; ++j) {
                 const auto index = first + j;
                 const auto vector = index / shVectorWidth;
                 const auto point = vector / (slots * shGroupSize) * shGroupSize + vector % shGroupSize;
                 const auto component = vector / shGroupSize % slots * shVectorWidth + index % shVectorWidth;
-                chunk[j] = point < next.count() && component < components
-                               ? next.shRest[point * components + component]
-                               : 0.f;
+                chunk[j] =
+                    point < targetGaussians && component < components
+                        ? next.shRest[sampledGaussian(point, next.count(), targetGaussians) * components +
+                                      component]
+                        : 0.f;
             }
             vkCmdUpdateBuffer(renderer.activeCommandBuffer(),
                               target.buffer,
@@ -555,25 +592,38 @@ struct StaticGsRenderer::Impl {
         }
     }
 
-    void ensureScene(const std::shared_ptr<const StaticScene>& next) {
-        if (scene == next) {
+    void ensureScene(const FrameState& frame) {
+        const auto target = frame.renderSettings.budgetedCount(frame.scene->count());
+        if (scene != frame.scene || targetGaussians != target) {
+            scene = frame.scene;
+            targetGaussians = target;
+            uploadedGaussians = 0;
+            capture.reset();
+            ++uploads;
+        }
+        if (uploadedGaussians == targetGaussians) {
             return;
         }
+        const auto batch = frame.renderSettings.uploadGaussiansPerFrame;
+        const auto batchSize =
+            batch ? (std::size_t(batch) + shGroupSize - 1) / shGroupSize * shGroupSize : targetGaussians;
+        const auto end = std::min(targetGaussians, uploadedGaussians + batchSize);
         renderer.beginCommandBatch();
-        upload(buffers.xyz_ws, next->positions);
-        upload(buffers.rotations, next->rotations);
-        upload(buffers.scaling_raw, next->logScales);
-        upload(buffers.opacity_raw, next->opacityLogits);
-        upload(buffers.sh0, next->sh0);
+        uploadAttributes(buffers.xyz_ws, scene->positions, 3, end);
+        uploadAttributes(buffers.rotations, scene->rotations, 4, end);
+        uploadAttributes(buffers.scaling_raw, scene->logScales, 3, end);
+        uploadAttributes(buffers.opacity_raw, scene->opacityLogits, 1, end);
+        uploadAttributes(buffers.sh0, scene->sh0, 3, end);
         // Overlays and unused projection slots share one zero fill.
-        const std::vector<float> zeros(1024, 0);
-        upload(dummy, zeros);
-        upload(overlays, zeros);
-        uploadSphericalHarmonics(*next);
+        if (!uploadedGaussians) {
+            const std::vector<float> zeros(1024, 0);
+            upload(dummy, zeros);
+            upload(overlays, zeros);
+        }
+        uploadSphericalHarmonics(*scene, end);
         renderer.endCommandBatch(true);
-        scene = next;
-        buffers.num_splats = scene->count();
-        ++uploads;
+        uploadedGaussians = end;
+        buffers.num_splats = uploadedGaussians;
     }
 
     void prepareReadback(std::size_t bytes) {
@@ -640,7 +690,7 @@ struct StaticGsRenderer::Impl {
         u.camera_height = f.height;
         u.grid_width = (f.width + TILE_WIDTH - 1) / TILE_WIDTH;
         u.grid_height = (f.height + TILE_HEIGHT - 1) / TILE_HEIGHT;
-        u.num_splats = static_cast<std::uint32_t>(scene->count());
+        u.num_splats = static_cast<std::uint32_t>(uploadedGaussians);
         u.model_num_splats = u.num_splats;
         u.active_sh = scene->shDegree;
         u.shN_layout_slots =
@@ -883,6 +933,9 @@ struct StaticGsRenderer::Impl {
         backend.telemetryBytes =
             tileTotals.deviceBuffer.allocSize + countersBufferSizeBytes + readbackCapacity;
         frame.gaussianCount = scene->count();
+        frame.submittedGaussians = uploadedGaussians;
+        frame.budgetedGaussians = targetGaussians;
+        frame.refining = uploadedGaussians < targetGaussians;
         backend.tileInstances = scope.references;
         backend.depthWaves = scope.waves;
         frame.sceneUploads = uploads;
@@ -908,12 +961,12 @@ struct StaticGsRenderer::Impl {
                 FrameReport& report) {
         refreshTelemetryWindow(f.scene, report);
         resetBackendTimers();
-        ensureScene(f.scene);
+        ensureScene(f);
         resetStageTimers();
 
         const auto camera = buildCameraFrame(f);
-        const bool captureRequested =
-            f.captureRequestId && (!capture || capture->requestId != f.captureRequestId);
+        const bool captureRequested = f.captureRequestId && uploadedGaussians == targetGaussians &&
+                                      (!capture || capture->requestId != f.captureRequestId);
         const auto scope = recordGaussianPass(camera.uniforms);
 
         // Recorded after the gate's batch-A submit/wait, which starts a fresh command buffer.

@@ -5,7 +5,9 @@
 #include <optional>
 #include <memory>
 #include "static_scene.hpp"
+#include "fdu4d_scene.hpp"
 #include "camera.hpp"
+#include "render_settings.hpp"
 #include <vector>
 
 namespace orbelio {
@@ -19,12 +21,14 @@ struct FrameCapture {
 
 struct FrameState {
     std::shared_ptr<const StaticScene> scene;
+    std::shared_ptr<const Fdu4dScene> fdu4d;
     std::uint64_t sceneVersion = 0;
     CameraState camera{};
     std::uint64_t captureRequestId = 0; // Zero keeps viewport pixels on the GPU.
     double timestampSeconds = 0.0;
     std::uint32_t width = 1;
     std::uint32_t height = 1;
+    RenderSettings renderSettings;
 };
 
 struct PoolStats {
@@ -42,6 +46,9 @@ struct FrameStats {
     std::uint64_t gaussianCount = 0;
     std::uint64_t sceneUploads = 0;
     std::uint64_t pixelReadbacks = 0;
+    std::uint64_t submittedGaussians = 0;
+    std::uint64_t budgetedGaussians = 0;
+    bool refining = false;
     double orbitDegrees = 0;
     std::shared_ptr<const FrameCapture> capture;
 
@@ -50,6 +57,7 @@ struct FrameStats {
     std::optional<double> rasterGpuMs;
     std::optional<double> composeGpuMs;
     std::optional<double> gpuRenderMs;
+    std::optional<double> temporalEvaluationCpuMs;
     std::optional<double> frameIntervalMs;
     double completeFrameMs = 0;
     double cpuSubmitMs = 0.0;

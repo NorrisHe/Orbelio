@@ -181,6 +181,31 @@ void captureRequestsStayUniqueAfterCompletion() {
     viewport.requestCapture(0);
     require(viewport.nextCaptureRequest() == 44, "Completed capture ID was reused");
 }
+
+void contentRollbackKeepsCameraAndCaptureIndependent() {
+    orbelio::ViewportState viewport;
+    const auto first = std::make_shared<orbelio::StaticScene>();
+    const auto second = std::make_shared<orbelio::StaticScene>();
+    viewport.setScene(first);
+    viewport.setSequenceFrame(first, .25);
+    const auto content = viewport.content();
+    viewport.orbitCamera(17, 4);
+    const auto camera = viewport.camera();
+    const auto request = viewport.nextCaptureRequest();
+    viewport.setSequenceFrame(second, .5);
+    const auto previousVersion = viewport.sceneVersion();
+    viewport.restoreContent(content);
+    const auto restored = viewport.frame(7, 640, 480);
+    require(restored.scene == first && restored.timestampSeconds == .25 &&
+                restored.camera.yawDegrees == camera.yawDegrees && restored.captureRequestId == request &&
+                restored.sceneVersion > previousVersion,
+            "Content rollback restored unrelated camera/capture state or reused an old version");
+    const auto sequenceVersion = viewport.sceneVersion();
+    viewport.setScene(first);
+    require(viewport.frame(7, 640, 480).timestampSeconds == 7 && viewport.sceneVersion() > sequenceVersion &&
+                viewport.camera().yawDegrees == camera.yawDegrees,
+            "Replacing sequence time with static content reused its version or reset the camera");
+}
 }
 
 int main() {
@@ -191,6 +216,7 @@ int main() {
         cameraAndSceneTimeHaveIndependentSnapshots();
         freeFlightKeepsEyeAndNormalizesMovement();
         captureRequestsStayUniqueAfterCompletion();
+        contentRollbackKeepsCameraAndCaptureIndependent();
         std::cout << "Camera framing, gestures, limits, DPI and snapshot isolation: PASS\n";
         return 0;
     } catch (const std::exception& error) {

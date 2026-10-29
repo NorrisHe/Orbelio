@@ -1,4 +1,6 @@
 #include <io_executor.hpp>
+#include <asset_reader.hpp>
+#include <orbelio/core/scene_loader.hpp>
 #include <QCoreApplication>
 #include <QThread>
 #include <atomic>
@@ -8,6 +10,12 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <QTemporaryFile>
+#include <QSemaphore>
+#include <QScopeGuard>
+#include <deque>
+#include <QDir>
+#include <QDataStream>
 
 namespace {
 constexpr std::size_t maxQueuedTasks = 4;
@@ -52,7 +60,8 @@ void checkSingleWorkerReuse(orbelio::QtIoExecutor& io) {
 
 // The gating task holds the whole byte budget, so the next reservation cannot be admitted.
 void checkBackpressure(orbelio::QtIoExecutor& io) {
-    std::promise<void> entered, unblock;
+    std::promise<void> entered;
+    std::promise<void> unblock;
     auto gate = unblock.get_future().share();
     post(
         io,
@@ -83,6 +92,71 @@ void checkStopRejects(orbelio::QtIoExecutor& io) {
     io.stop();
     require(!io.tryPost([] {}), "Stopped executor accepted a task");
 }
+
+class ManualCompletions final : public orbelio::IExecutor {
+public:
+    std::deque<Task> tasks;
+
+    bool tryPost(Task task, std::size_t) override {
+        tasks.push_back(std::move(task));
+        return true;
+    }
+};
+
+QByteArray tinyGaussian() {
+    QByteArray result;
+    QDataStream stream(&result, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    for (const auto value : {0.f, 0.f, 0.f, 1.f, 1.f, 1.f}) {
+        stream << value;
+    }
+    stream.writeRawData("\xff\xff\xff\xff\xff\x80\x80\x80", 8);
+    return result;
+}
+
+void checkQueuedSceneReadsKeepSeparateMemoryBudgets(orbelio::QtIoExecutor& io) {
+    constexpr std::size_t residentBudget = 100;
+    QTemporaryFile asset(QDir::tempPath() + "/orbelio-io-XXXXXX.splat");
+    require(asset.open() && asset.write(tinyGaussian()) == tinyGaussian().size(),
+            "Could not write IO fixture");
+    asset.close();
+    orbelio::QtAssetReader reader;
+    orbelio::BytePool pool(ioByteBudget);
+    ManualCompletions completions;
+    orbelio::ModelLimits limits{};
+    limits.inputBytes = ioByteBudget;
+    limits.residentBytes = residentBudget;
+    orbelio::SceneLoader loader(io, completions, reader, pool, limits);
+    std::vector<orbelio::SceneLoadResult> results;
+    QSemaphore gate;
+    const auto unblock = qScopeGuard([&] {
+        gate.release();
+        io.drain();
+    });
+    post(io, [&] { gate.acquire(); }, 0, "Could not hold IO worker");
+    const auto path = asset.fileName().toUtf8().toStdString();
+    const auto completion = [&](auto result) { results.push_back(std::move(result)); };
+    const bool first = loader.load(path, completion);
+    const bool second = loader.load(path, completion);
+    gate.release();
+    io.drain();
+    require(first && second, "A queued read reserved the whole future input budget and rejected replacement");
+    require(completions.tasks.size() == 2 && loader.residentBytes() <= residentBudget &&
+                pool.stats().activeBytes == 0 && pool.stats().peakBytes <= ioByteBudget,
+            "Queued reads exceeded resident/input budgets or retained an input lease");
+    for (auto& task : completions.tasks) {
+        task();
+    }
+    require(results.size() == 2, "Queued reads did not both complete");
+    if (!results[0].scene || results[1].scene || results[1].error.empty()) {
+        throw std::runtime_error("Queued results violated resident budget: first=" + results[0].error +
+                                 "; second=" + results[1].error);
+    }
+    completions.tasks.clear();
+    results.clear();
+    require(loader.residentBytes() == 0, "Consumed queued results retained resident memory");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -92,6 +166,7 @@ int main(int argc, char** argv) {
         checkSingleWorkerReuse(io);
         checkBackpressure(io);
         checkExceptionAccounting(io);
+        checkQueuedSceneReadsKeepSeparateMemoryBudgets(io);
         checkStopRejects(io);
         std::cout << "Single-worker reuse, backpressure, exception accounting and stop: PASS\n";
         return 0;

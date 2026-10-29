@@ -1,6 +1,7 @@
 #include <orbelio/core/byte_pool.hpp>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 static void require(bool value, const char* message) {
     if (!value) {
@@ -8,8 +9,28 @@ static void require(bool value, const char* message) {
     }
 }
 
+static void activeStorageSurvivesPoolGrowth() {
+    constexpr std::size_t slotBytes = 4096;
+    constexpr std::size_t additionalLeases = 64;
+    orbelio::BytePool pool(slotBytes * (additionalLeases + 1));
+    auto first = pool.acquire(16);
+    auto* address = first.bytes().data();
+    first.bytes()[0] = std::byte{42};
+    std::vector<orbelio::BytePool::Lease> leases;
+    for (std::size_t index = 0; index < additionalLeases; ++index) {
+        leases.push_back(pool.acquire(16));
+    }
+    require(first.bytes().data() == address && first.bytes()[0] == std::byte{42},
+            "Growing the pool moved active byte storage");
+    leases.clear();
+    pool.trim();
+    require(pool.stats().activeBytes == slotBytes && first.bytes().data() == address,
+            "Trimming other slots invalidated an active lease");
+}
+
 int main() {
     try {
+        activeStorageSurvivesPoolGrowth();
         orbelio::BytePool pool(8192);
         auto first = pool.acquire(4000);
         auto* address = first.bytes().data();

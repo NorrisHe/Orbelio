@@ -13,6 +13,7 @@
 #include <QQuickView>
 #include <QScreen>
 #include <QThread>
+#include <QSettings>
 #include <algorithm>
 #include <iostream>
 
@@ -27,8 +28,31 @@ constexpr int screenMarginHeight = 100;
 struct Options {
     bool validation = false;
     orbelio::ModelLimits limits{};
+    orbelio::RenderSettings renderSettings;
     QString modelPath = QStringLiteral(":/samples/guitar/guitar.compressed.ply");
 };
+
+std::uint32_t gaussianOption(const QCommandLineParser& parser, const char* name, std::uint32_t fallback) {
+    if (!parser.isSet(name)) {
+        return fallback;
+    }
+    bool valid = false;
+    const auto value = parser.value(name).toUInt(&valid);
+    if (!valid || value > orbelio::ModelLimits{}.maxGaussians) {
+        throw std::invalid_argument(std::string(name) + " must be between 0 and 8000000");
+    }
+    return value;
+}
+
+orbelio::RenderSettings renderSettings(const QCommandLineParser& parser) {
+    const QSettings stored("Orbelio", "Viewer");
+    const auto limit = std::uint32_t(orbelio::ModelLimits{}.maxGaussians);
+    return {gaussianOption(
+                parser, "splat-budget", std::min(stored.value("render/maxGaussians", 0).toUInt(), limit)),
+            gaussianOption(parser,
+                           "upload-gaussians-per-frame",
+                           std::min(stored.value("render/uploadGaussiansPerFrame", 262144).toUInt(), limit))};
+}
 
 std::size_t budgetOption(const QCommandLineParser& parser, const char* name, std::size_t fallback) {
     if (!parser.isSet(name)) {
@@ -49,6 +73,7 @@ orbelio::ModelLimits modelLimits(const QCommandLineParser& parser) {
     limits.decodedBytes = budgetOption(parser, "decode-budget-mib", limits.decodedBytes);
     limits.residentBytes = budgetOption(parser, "cpu-budget-mib", limits.residentBytes);
     limits.gpuBytes = budgetOption(parser, "gpu-budget-mib", limits.gpuBytes);
+    limits.sequenceCacheBytes = budgetOption(parser, "sequence-cache-mib", limits.sequenceCacheBytes);
     return limits;
 }
 
@@ -64,10 +89,17 @@ Options parseOptions(QGuiApplication& app) {
     parser.addOption(
         {"cpu-budget-mib", "CPU scenes and pending results limit in MiB (default: 1024).", "MiB"});
     parser.addOption({"gpu-budget-mib", "Engine GPU allocation/block limit in MiB (default: 1024).", "MiB"});
+    parser.addOption({"sequence-cache-mib", "Decoded sequence cache limit in MiB (default: 256).", "MiB"});
+    parser.addOption(
+        {"splat-budget", "Maximum Gaussians submitted per frame; 0 keeps full quality.", "count"});
+    parser.addOption({"upload-gaussians-per-frame",
+                      "GPU upload batch; 0 uploads all. Rounded up to 32 Gaussians.",
+                      "count"});
     parser.process(app);
     Options options{};
     options.validation = parser.isSet("validation");
     options.limits = modelLimits(parser);
+    options.renderSettings = renderSettings(parser);
     if (parser.isSet("model")) {
         options.modelPath = parser.value("model");
     }
@@ -93,6 +125,8 @@ void attachWindow(QQuickView& view, orbelio::AppModel& model, orbelio::VulkanHos
 }
 
 void connectViewport(orbelio::AppModel& model, orbelio::ViewportBridge& bridge) {
+    QObject::connect(
+        &model, &orbelio::AppModel::frameRequested, &bridge, &orbelio::ViewportBridge::requestFrame);
     QObject::connect(
         &bridge, &orbelio::ViewportBridge::frameCompleted, &model, &orbelio::AppModel::acceptFrame);
     QObject::connect(
@@ -141,7 +175,13 @@ int runViewer(QGuiApplication& app, const Options& options) {
     orbelio::QtIoExecutor ioExecutor(16, options.limits.inputBytes);
     orbelio::SceneLoader loader(ioExecutor, completions, reader, cpuPool, options.limits);
     orbelio::ViewportState viewport;
+    viewport.setRenderSettings(options.renderSettings);
     orbelio::AppModel model(host.validationEnabled(), loader, viewport, cpuPool);
+    QObject::connect(&model, &orbelio::AppModel::renderSettingsChanged, &model, [&viewport] {
+        QSettings stored("Orbelio", "Viewer");
+        stored.setValue("render/maxGaussians", viewport.renderSettings().maxGaussians);
+        stored.setValue("render/uploadGaussiansPerFrame", viewport.renderSettings().uploadGaussiansPerFrame);
+    });
     // The bridge must outlive the window's render-thread shutdown.
     std::unique_ptr<orbelio::ViewportBridge> bridge;
     std::unique_ptr<orbelio::CameraTools> cameraTools;

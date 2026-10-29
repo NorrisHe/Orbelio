@@ -46,7 +46,7 @@ private:
     }
 
     void prepare() {
-        if (failed_ && failedVersion_ == state_.sceneVersion) {
+        if (failed_ && failedVersion_ == state_.sceneVersion && failedSettings_ == state_.renderSettings) {
             return;
         }
         failed_ = false;
@@ -74,6 +74,7 @@ private:
     void failFrame(const char* message) {
         failed_ = true;
         failedVersion_ = state_.sceneVersion;
+        failedSettings_ = state_.renderSettings;
         rendered_ = false;
         if (renderer_) {
             renderer_->waitIdle();
@@ -133,6 +134,7 @@ private:
     bool rendered_ = false;
     bool failed_ = false;
     std::uint64_t failedVersion_ = 0;
+    RenderSettings failedSettings_;
 };
 } // namespace
 

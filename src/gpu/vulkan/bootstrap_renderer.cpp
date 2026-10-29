@@ -1,5 +1,5 @@
 #include "bootstrap_renderer.hpp"
-#include "static_gs_renderer.hpp"
+#include "gaussian_renderer.hpp"
 #ifdef ORBELIO_TRACY_ENABLED
 #include <tracy/Tracy.hpp>
 #endif
@@ -13,10 +13,9 @@ namespace orbelio {
 namespace {
 using Clock = std::chrono::steady_clock;
 
-constexpr std::size_t bufferPoolBudgetBytes = 32 * 1024 * 1024;
+constexpr std::size_t maximumAllocatorBlockBytes = 32 * 1024 * 1024;
 constexpr std::size_t hostBudgetDivisor = 5;
 constexpr std::size_t allocatorBlockDivisor = 8;
-constexpr std::size_t placeholderScratchBytes = 4096;
 constexpr std::uint32_t imageBucketPixels = 64;
 constexpr std::uint32_t imageLimitPixels = 8192;
 constexpr std::uint64_t submissionWaitNs = 5'000'000'000ULL;
@@ -140,7 +139,6 @@ BootstrapRenderer::BootstrapRenderer(DeviceContext context, std::size_t gpuBudge
     : context_(context), gpuBudgetBytes_(gpuBudgetBytes) {
     try {
         createAllocator();
-        buffers_ = std::make_unique<GpuBufferPool>(allocator_, bufferPoolBudgetBytes);
         createCommandResources();
         detectTimestampSupport();
     } catch (...) {
@@ -161,7 +159,6 @@ void BootstrapRenderer::destroy() noexcept {
     // Shutdown only. Normal frames use a fence, never vkDeviceWaitIdle.
     waitIdle();
     gs_.reset();
-    buffers_.reset();
     destroyTargetImage();
     if (queries_) {
         vkDestroyQueryPool(context_.device, queries_, nullptr);
@@ -203,7 +200,7 @@ void BootstrapRenderer::createAllocator() {
     info.pVulkanFunctions = &functions;
     info.pHeapSizeLimit = limits.data();
     info.preferredLargeHeapBlockSize =
-        std::min<VkDeviceSize>(gpuBudgetBytes_ / allocatorBlockDivisor, bufferPoolBudgetBytes);
+        std::min<VkDeviceSize>(gpuBudgetBytes_ / allocatorBlockDivisor, maximumAllocatorBlockBytes);
     vkCheck(vmaCreateAllocator(&info, &allocator_), "vmaCreateAllocator");
 }
 
@@ -301,7 +298,7 @@ void BootstrapRenderer::render(const FrameState& state) {
     }
     report_.frame.gpuWaitMs = 0;
     frameStart_ = Clock::now();
-    if (state.scene) {
+    if (state.scene || state.fdu4d) {
         renderGaussians(state);
     } else {
         if (gs_) {
@@ -317,8 +314,12 @@ void BootstrapRenderer::render(const FrameState& state) {
 }
 
 void BootstrapRenderer::renderGaussians(const FrameState& state) {
-    if (!gs_) {
-        gs_ = std::make_unique<StaticGsRenderer>(context_, allocator_);
+    const auto kind = GaussianRendererFactory::kind(state);
+    if (!gs_ || gsKind_ != kind) {
+        gs_.reset();
+        clearSceneReport(report_);
+        gs_ = GaussianRendererFactory::create(kind, context_, allocator_);
+        gsKind_ = kind;
     }
     gs_->render(state, image_, imageView_, imageHasContent_, report_);
     imageHasContent_ = true;
@@ -327,56 +328,45 @@ void BootstrapRenderer::renderGaussians(const FrameState& state) {
 }
 
 void BootstrapRenderer::renderPlaceholder(const FrameState& state) {
-    auto scratch = buffers_->acquire(placeholderScratchBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    try {
-        beginOneTimeCommands();
-        if (queries_) {
-            vkCmdResetQueryPool(command_, queries_, timestampFirstQuery, timestampQueryCount);
-            vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries_, timestampFirstQuery);
-        }
-        vkCmdFillBuffer(command_, scratch.buffer, 0, placeholderScratchBytes, 0);
-
-        const auto toTransferDst = targetBarrier(image_, imageHasContent_);
-        const auto sourceStage =
-            imageHasContent_ ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        applyImageBarrier(command_, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT, toTransferDst);
-
-        const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(state.timestampSeconds));
-        const VkClearColorValue idleColor{
-            {0.025f + pulse * 0.015f, 0.045f + pulse * 0.025f, 0.075f + pulse * 0.04f, 1.0f}};
-        vkCmdClearColorImage(command_,
-                             image_,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &idleColor,
-                             1,
-                             &toTransferDst.subresourceRange);
-
-        auto toReadable = toTransferDst;
-        toReadable.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        toReadable.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        toReadable.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toReadable.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        applyImageBarrier(
-            command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, toReadable);
-
-        if (queries_) {
-            vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, timestampLastQuery);
-        }
-        vkCheck(vkEndCommandBuffer(command_), "vkEndCommandBuffer");
-        submitPlaceholderFrame();
-
-        report_.frame.cpuSubmitMs = elapsedMs(frameStart_);
-        waitSubmission();
-        imageHasContent_ = true;
-        timestampsRecorded_ = static_cast<bool>(queries_);
-        buffers_->release(scratch);
-    } catch (...) {
-        // The pool is torn down only after device idle if a submitted frame failed.
-        if (!fencePending_) {
-            buffers_->release(scratch);
-        }
-        throw;
+    beginOneTimeCommands();
+    if (queries_) {
+        vkCmdResetQueryPool(command_, queries_, timestampFirstQuery, timestampQueryCount);
+        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries_, timestampFirstQuery);
     }
+
+    const auto toTransferDst = targetBarrier(image_, imageHasContent_);
+    const auto sourceStage =
+        imageHasContent_ ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    applyImageBarrier(command_, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT, toTransferDst);
+
+    const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(state.timestampSeconds));
+    const VkClearColorValue idleColor{
+        {0.025f + pulse * 0.015f, 0.045f + pulse * 0.025f, 0.075f + pulse * 0.04f, 1.0f}};
+    vkCmdClearColorImage(command_,
+                         image_,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &idleColor,
+                         1,
+                         &toTransferDst.subresourceRange);
+
+    auto toReadable = toTransferDst;
+    toReadable.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toReadable.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toReadable.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toReadable.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    applyImageBarrier(
+        command_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, toReadable);
+
+    if (queries_) {
+        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, timestampLastQuery);
+    }
+    vkCheck(vkEndCommandBuffer(command_), "vkEndCommandBuffer");
+    submitPlaceholderFrame();
+
+    report_.frame.cpuSubmitMs = elapsedMs(frameStart_);
+    waitSubmission();
+    imageHasContent_ = true;
+    timestampsRecorded_ = static_cast<bool>(queries_);
 }
 
 void BootstrapRenderer::beginOneTimeCommands() {
@@ -399,7 +389,6 @@ FrameReport BootstrapRenderer::finishFrame() {
     guard_.check();
     submitCompletionFence();
     readGpuTimestamps();
-    report_.backend.buffers = buffers_->stats();
     ++report_.frame.frameIndex;
     sampleHeapBudgets();
     report_.backend.allocatorBudgetBytes = gpuBudgetBytes_;

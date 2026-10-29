@@ -6,7 +6,7 @@ namespace orbelio::detail {
 class IModelDecoder {
 public:
     virtual ~IModelDecoder() = default;
-    virtual StaticScene decode(std::span<const std::byte> bytes, DecodeContext& context) const = 0;
+    virtual DecodedScene decode(std::span<const std::byte> bytes, DecodeContext& context) const = 0;
 };
 
 class ModelDecoderFactory {

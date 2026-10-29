@@ -118,6 +118,7 @@ void finishDecodedScene(StaticScene& scene);
 void validateDecodedScene(StaticScene& scene);
 void normalizeRotation(StaticScene& scene, std::size_t index);
 StaticScene readPly(std::span<const std::byte> data, DecodeContext& context);
+Fdu4dScene readFdu4d(std::span<const std::byte> data, DecodeContext& context);
 StaticScene readSplat(std::span<const std::byte> data, DecodeContext& context);
 StaticScene readKsplat(std::span<const std::byte> data, DecodeContext& context);
 StaticScene readSpz(std::span<const std::byte> data, DecodeContext& context);

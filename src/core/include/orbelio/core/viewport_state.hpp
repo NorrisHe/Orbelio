@@ -8,29 +8,74 @@ namespace orbelio {
 // One owner thread mutates state; adapters must freeze it while copying a frame snapshot.
 class ViewportState {
 public:
+    struct ContentSnapshot {
+        std::shared_ptr<const StaticScene> scene;
+        std::optional<double> sequenceTime;
+        std::shared_ptr<const Fdu4dScene> fdu4d;
+    };
+
+    ContentSnapshot content() const { return {scene_, sequenceTime_, fdu4d_}; }
+
     void setScene(std::shared_ptr<const StaticScene> scene) {
-        if (scene_ != scene) {
+        const bool sceneChanged = scene_ != scene || bool(fdu4d_);
+        if (sceneChanged || sequenceTime_) {
             scene_ = std::move(scene);
+            fdu4d_.reset();
+            sequenceTime_.reset();
             ++sceneVersion_;
+            if (sceneChanged) {
+                resetCamera();
+            }
+        }
+    }
+
+    void setSequenceFrame(std::shared_ptr<const StaticScene> scene, double timestamp) {
+        if (scene_ != scene || fdu4d_ || sequenceTime_ != timestamp) {
+            scene_ = std::move(scene);
+            fdu4d_.reset();
+            sequenceTime_ = timestamp;
+            ++sceneVersion_;
+        }
+    }
+
+    void setFdu4d(std::shared_ptr<const Fdu4dScene> scene) {
+        const bool changed = scene_ || fdu4d_ != scene;
+        scene_.reset();
+        fdu4d_ = std::move(scene);
+        sequenceTime_ = fdu4d_ ? std::optional(fdu4d_->startTime) : std::nullopt;
+        ++sceneVersion_;
+        if (changed) {
             resetCamera();
         }
     }
 
-    void restore(const ViewportState& previous) {
-        scene_ = previous.scene_;
-        camera_ = previous.camera_;
+    void setFduTime(double time) {
+        if (!fdu4d_) {
+            return;
+        }
+        time = fdu4d_->clampTime(time);
+        if (sequenceTime_ != time) {
+            sequenceTime_ = time;
+            ++sceneVersion_;
+        }
+    }
+
+    void restoreContent(const ContentSnapshot& previous) {
+        scene_ = previous.scene;
+        sequenceTime_ = previous.sequenceTime;
+        fdu4d_ = previous.fdu4d;
         ++sceneVersion_;
     }
 
-    unsigned shDegree() const { return scene_ ? scene_->shDegree : 0; }
+    unsigned shDegree() const { return spatial() ? spatial()->shDegree : 0; }
 
-    std::string sceneFormat() const { return scene_ ? scene_->format : std::string{}; }
+    std::string sceneFormat() const { return spatial() ? spatial()->format : std::string{}; }
 
-    bool hasScene() const { return static_cast<bool>(scene_); }
+    bool hasScene() const { return scene_ || fdu4d_; }
 
     std::uint64_t sceneVersion() const { return sceneVersion_; }
 
-    std::size_t gaussianCount() const { return scene_ ? scene_->count() : 0; }
+    std::size_t gaussianCount() const { return spatial() ? spatial()->count() : 0; }
 
     void orbitCamera(float yawDegrees, float pitchDegrees) { camera_.orbit(yawDegrees, pitchDegrees); }
 
@@ -51,32 +96,44 @@ public:
     }
 
     void fitCamera() {
-        if (scene_) {
-            camera_.fit(scene_->center, scene_->radius);
+        if (spatial()) {
+            camera_.fit(spatial()->center, spatial()->radius);
         }
     }
 
     void resetCamera() {
-        camera_.reset(scene_ ? scene_->center : std::array<float, 3>{}, scene_ ? scene_->radius : 1.f);
+        camera_.reset(spatial() ? spatial()->center : std::array<float, 3>{},
+                      spatial() ? spatial()->radius : 1.f);
     }
 
     void requestCapture(std::uint64_t requestId) { captureRequestId_ = requestId; }
 
+    const RenderSettings& renderSettings() const { return renderSettings_; }
+
+    void setRenderSettings(RenderSettings settings) { renderSettings_ = settings; }
+
     FrameState frame(double time, std::uint32_t width, std::uint32_t height) const {
         return {.scene = scene_,
+                .fdu4d = fdu4d_,
                 .sceneVersion = sceneVersion_,
                 .camera = camera_,
                 .captureRequestId = captureRequestId_,
-                .timestampSeconds = time,
+                .timestampSeconds = sequenceTime_.value_or(time),
                 .width = std::max(1u, width),
-                .height = std::max(1u, height)};
+                .height = std::max(1u, height),
+                .renderSettings = renderSettings_};
     }
 
 private:
+    const StaticScene* spatial() const { return fdu4d_ ? &fdu4d_->spatial : scene_.get(); }
+
     std::shared_ptr<const StaticScene> scene_;
+    std::shared_ptr<const Fdu4dScene> fdu4d_;
     std::uint64_t sceneVersion_ = 0;
     CameraState camera_{};
     std::uint64_t captureRequestId_ = 0;
     std::uint64_t captureSerial_ = 0;
+    std::optional<double> sequenceTime_;
+    RenderSettings renderSettings_;
 };
 }

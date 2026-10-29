@@ -26,7 +26,6 @@ struct BackendStats {
     std::size_t allocatorReservedBytes = 0;
     std::size_t allocatorPeakBytes = 0;
     std::size_t allocatorBudgetBytes = 0;
-    PoolStats buffers;
     std::uint64_t imageAllocations = 0;
     std::size_t imageReservedBytes = 0;
 

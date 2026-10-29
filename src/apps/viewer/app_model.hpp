@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sequence_player.hpp"
+
 #include <orbelio/core/scene_loader.hpp>
 #include <orbelio/core/viewport_state.hpp>
 #include <renderer_stats.hpp>
@@ -29,6 +31,10 @@ class AppModel final : public QObject {
     Q_PROPERTY(QString sceneFormat READ sceneFormat NOTIFY changed)
     Q_PROPERTY(QString budgetDescription READ budgetDescription CONSTANT)
     Q_PROPERTY(qulonglong gaussianCount READ gaussianCount NOTIFY changed)
+    Q_PROPERTY(QObject* timeline READ timeline CONSTANT)
+    Q_PROPERTY(int maxGaussians READ maxGaussians WRITE setMaxGaussians NOTIFY renderSettingsChanged)
+    Q_PROPERTY(int uploadGaussiansPerFrame READ uploadGaussiansPerFrame WRITE setUploadGaussiansPerFrame
+                   NOTIFY renderSettingsChanged)
 public:
     AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool);
 
@@ -59,6 +65,18 @@ public:
     QString sceneFormat() const { return QString::fromStdString(viewport_.sceneFormat()); }
 
     QString budgetDescription() const;
+
+    QObject* timeline() { return &sequencePlayer_; }
+
+    int maxGaussians() const { return int(viewport_.renderSettings().maxGaussians); }
+
+    int uploadGaussiansPerFrame() const { return int(viewport_.renderSettings().uploadGaussiansPerFrame); }
+
+    void setMaxGaussians(int value);
+    void setUploadGaussiansPerFrame(int value);
+
+    SequencePlayer& sequencePlayer() { return sequencePlayer_; }
+
     void loadModel(const QString& path);
     Q_INVOKABLE void openFiles(const QList<QUrl>& urls);
     Q_INVOKABLE void unloadModel();
@@ -67,6 +85,8 @@ Q_SIGNALS:
     void sceneLoaded(double ioMilliseconds);
     void sceneChanged();
     void changed();
+    void frameRequested();
+    void renderSettingsChanged();
 
 private:
     enum class LoadState { Empty, Loading, Ready, Error };
@@ -79,6 +99,7 @@ private:
     static constexpr unsigned warmupSceneFrames = 30;
 
     void resetMeasurements();
+    void setRenderSettings(RenderSettings settings);
 
     void dispatchPendingRequest();
     void finishModelRead(const LoadRequest& request, SceneLoadResult result);
@@ -104,7 +125,8 @@ private:
     bool readPending_ = false;
 
     struct DisplayedScene {
-        ViewportState viewport;
+        ViewportState::ContentSnapshot content;
+        CameraState camera;
         QString path;
         QString name;
     };
@@ -116,9 +138,10 @@ private:
     SceneLoader& sceneLoader_;
     ViewportState& viewport_;
     BytePool& cpuPool_;
+    SequencePlayer sequencePlayer_;
+    std::shared_ptr<const PlySequence> pendingSequence_;
     QVariantMap performance_;
     std::uint32_t viewportWidth_ = 0;
     std::uint32_t viewportHeight_ = 0;
-    std::uint64_t sceneUploads_ = 0;
 };
 } // namespace orbelio

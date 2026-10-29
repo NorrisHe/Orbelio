@@ -84,7 +84,9 @@ void deferredLoadSurvivesLoaderDestruction() {
                 "Load rejected");
     }
     require(!result && reader.requestedAsset.empty(), "Load ran on the caller");
-    require(worker.reservation == orbelio::SceneLoader::modelByteBudget, "Missing queue reservation");
+    require(worker.reservation >= std::string_view("memory:guitar").size() &&
+                worker.reservation < orbelio::SceneLoader::modelByteBudget,
+            "Queue reservation must describe retained metadata, not future input allocation");
     worker.runOne();
     require(reader.requestedAsset == "memory:guitar", "Reader dependency was not used");
     require(!result && completions.tasks.size() == 1, "Completion escaped its injected executor");

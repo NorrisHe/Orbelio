@@ -3,6 +3,8 @@
 #include "asset_reader.hpp"
 #include "executor.hpp"
 #include "static_scene.hpp"
+#include "ply_sequence.hpp"
+#include "fdu4d_scene.hpp"
 #include <functional>
 #include <memory>
 #include <string>
@@ -12,6 +14,8 @@ struct SceneLoadResult {
     std::shared_ptr<const StaticScene> scene;
     std::string error;
     double ioMilliseconds = 0;
+    std::shared_ptr<const PlySequence> sequence;
+    std::shared_ptr<const Fdu4dScene> fdu4d;
 };
 
 class SceneLoader {

@@ -9,12 +9,21 @@ class FormatDecoder final : public detail::IModelDecoder {
 public:
     explicit FormatDecoder(Reader reader) : reader_(reader) {}
 
-    StaticScene decode(std::span<const std::byte> bytes, detail::DecodeContext& context) const override {
-        return reader_(bytes, context);
+    DecodedScene decode(std::span<const std::byte> bytes, detail::DecodeContext& context) const override {
+        auto scene = reader_(bytes, context);
+        detail::finishDecodedScene(scene);
+        return scene;
     }
 
 private:
     Reader reader_;
+};
+
+class FduDecoder final : public detail::IModelDecoder {
+public:
+    DecodedScene decode(std::span<const std::byte> bytes, detail::DecodeContext& context) const override {
+        return detail::readFdu4d(bytes, context);
+    }
 };
 
 std::string extensionOf(std::string_view filename) {
@@ -31,6 +40,9 @@ std::unique_ptr<detail::IModelDecoder> detail::ModelDecoderFactory::create(std::
                                                                            std::string_view filename) {
     const auto extension = extensionOf(filename);
     const std::string_view prefix(reinterpret_cast<const char*>(bytes.data()), std::min(bytes.size(), 4uz));
+    if (prefix == "FDU4" || extension == ".fdu4d") {
+        return std::make_unique<FduDecoder>();
+    }
     Reader reader = nullptr;
     if (prefix.starts_with("ply") || extension == ".ply") {
         reader = readPly;
@@ -43,7 +55,7 @@ std::unique_ptr<detail::IModelDecoder> detail::ModelDecoderFactory::create(std::
     } else if (extension == ".splat") {
         reader = readSplat;
     }
-    require(reader != nullptr, "Unsupported model format (PLY, SOG, SPZ, SPLAT, KSPLAT)");
+    require(reader != nullptr, "Unsupported model format (PLY, SOG, SPZ, SPLAT, KSPLAT, FDU4D)");
     return std::make_unique<FormatDecoder>(reader);
 }
 
@@ -58,11 +70,18 @@ StaticScene decodeModel(std::span<const std::byte> bytes,
                         const ModelLimits& limits,
                         const MemoryBudget& resident,
                         ModelAssetResolver resolver) {
+    auto decoded = decodeScene(bytes, filename, limits, resident, std::move(resolver));
+    detail::require(std::holds_alternative<StaticScene>(decoded), "Dynamic model requires decodeScene");
+    return std::move(std::get<StaticScene>(decoded));
+}
+
+DecodedScene decodeScene(std::span<const std::byte> bytes,
+                         std::string_view filename,
+                         const ModelLimits& limits,
+                         const MemoryBudget& resident,
+                         ModelAssetResolver resolver) {
     detail::require(!bytes.empty() && bytes.size() <= limits.inputBytes, "Input exceeds model byte budget");
     detail::DecodeContext context{limits, resident, std::move(resolver)};
-    auto decoder = detail::ModelDecoderFactory::create(bytes, filename);
-    auto scene = decoder->decode(bytes, context);
-    detail::finishDecodedScene(scene);
-    return scene;
+    return detail::ModelDecoderFactory::create(bytes, filename)->decode(bytes, context);
 }
 }

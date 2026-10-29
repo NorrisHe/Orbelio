@@ -1,15 +1,15 @@
 #pragma once
 
-#include "buffer_pool.hpp"
 #include "renderer.hpp"
 #include "renderer_stats.hpp"
+#include "gaussian_renderer.hpp"
+#include "vma.hpp"
 #include <chrono>
 #include <memory>
 
 namespace orbelio {
-class StaticGsRenderer;
 
-// Owns the native target, pooled resources and the replaceable static GS backend.
+// Owns the native target, pooled resources and the selected Gaussian backend.
 class BootstrapRenderer final : public IVulkanRenderer {
 public:
     explicit BootstrapRenderer(DeviceContext context, std::size_t gpuBudgetBytes = ModelLimits{}.gpuBytes);
@@ -53,8 +53,8 @@ private:
     DeviceContext context_;
     std::size_t gpuBudgetBytes_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
-    std::unique_ptr<GpuBufferPool> buffers_;
-    std::unique_ptr<StaticGsRenderer> gs_;
+    std::unique_ptr<IGaussianRenderer> gs_;
+    GaussianRendererKind gsKind_ = GaussianRendererKind::Static;
 
     VkImage image_ = VK_NULL_HANDLE;
     VkImageView imageView_ = VK_NULL_HANDLE;

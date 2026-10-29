@@ -29,7 +29,7 @@ struct BytePool::State {
     };
 
     std::mutex mutex;
-    std::vector<std::unique_ptr<Slot>> slots;
+    std::vector<Slot> slots;
     std::size_t budget;
     PoolStats counters;
 
@@ -39,11 +39,11 @@ struct BytePool::State {
     std::size_t findReusableSlot(std::size_t capacity) const {
         std::size_t best = slots.size();
         for (std::size_t i = 0; i < slots.size(); ++i) {
-            const auto& slot = *slots[i];
+            const auto& slot = slots[i];
             if (slot.used || !slot.data || slot.capacity < capacity) {
                 continue;
             }
-            if (best == slots.size() || slot.capacity < slots[best]->capacity) {
+            if (best == slots.size() || slot.capacity < slots[best].capacity) {
                 best = i;
             }
         }
@@ -53,7 +53,7 @@ struct BytePool::State {
     // A slot vector entry without storage is the one place a fresh allocation may land.
     std::size_t findVacantSlot() const {
         for (std::size_t i = 0; i < slots.size(); ++i) {
-            if (!slots[i]->used && !slots[i]->data) {
+            if (!slots[i].used && !slots[i].data) {
                 return i;
             }
         }
@@ -68,8 +68,8 @@ struct BytePool::State {
 
     void forgetIdleSlots() {
         for (auto& slot : slots) {
-            if (!slot->used && slot->data) {
-                forget(*slot);
+            if (!slot.used && slot.data) {
+                forget(slot);
             }
         }
     }
@@ -84,9 +84,7 @@ struct BytePool::State {
         if (capacity > budget - counters.reservedBytes) {
             throw std::runtime_error("CPU pool budget exceeded by active leases");
         }
-        auto fresh = std::make_unique<Slot>();
-        fresh->data = std::make_unique<std::byte[]>(capacity);
-        fresh->capacity = capacity;
+        Slot fresh{std::make_unique<std::byte[]>(capacity), capacity};
         const std::size_t index = findVacantSlot();
         if (index == slots.size()) {
             slots.push_back(std::move(fresh));
@@ -125,7 +123,7 @@ void BytePool::Lease::release() {
     }
     {
         std::lock_guard lock(state_->mutex);
-        auto& slot = *state_->slots.at(slot_);
+        auto& slot = state_->slots[slot_];
         slot.used = false;
         state_->counters.activeBytes -= slot.capacity;
     }
@@ -138,7 +136,7 @@ std::span<std::byte> BytePool::Lease::bytes() const {
         return {};
     }
     std::lock_guard lock(state_->mutex);
-    return {state_->slots.at(slot_)->data.get(), size_};
+    return {state_->slots[slot_].data.get(), size_};
 }
 
 BytePool::Lease BytePool::acquire(std::size_t bytes) {
@@ -150,7 +148,7 @@ BytePool::Lease BytePool::acquire(std::size_t bytes) {
     } else {
         ++state_->counters.reuses;
     }
-    auto& slot = *state_->slots[slotIndex];
+    auto& slot = state_->slots[slotIndex];
     slot.used = true;
     state_->counters.activeBytes += slot.capacity;
     state_->counters.peakBytes = std::max(state_->counters.peakBytes, state_->counters.reservedBytes);
