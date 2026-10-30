@@ -6,7 +6,8 @@
 
 namespace orbelio {
 namespace {
-constexpr std::uint32_t requiredPushConstantBytes = 224;
+constexpr std::uint32_t requiredPushConstantBytes = 128;
+constexpr std::uint32_t requiredWorkgroupSize = 256;
 constexpr VkQueueFlags requiredQueueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
 
 bool hasExtension(const std::vector<VkExtensionProperties>& available, std::string_view name) {
@@ -75,7 +76,7 @@ std::vector<VkPhysicalDevice> VulkanHost::enumeratePhysicalDevices() const {
 }
 
 std::optional<VulkanHost::Admission> VulkanHost::probeAdmission(VkPhysicalDevice physical) const {
-    Admission admission;
+    Admission admission{};
     vkGetPhysicalDeviceProperties(physical, &admission.properties);
     if (admission.properties.apiVersion < VK_API_VERSION_1_3) {
         return std::nullopt;
@@ -86,11 +87,8 @@ std::optional<VulkanHost::Admission> VulkanHost::probeAdmission(VkPhysicalDevice
     auto supported12 =
         vkInfo<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
     supported12.pNext = &supported13;
-    auto supported11 =
-        vkInfo<VkPhysicalDeviceVulkan11Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
-    supported11.pNext = &supported12;
     auto supported = vkInfo<VkPhysicalDeviceFeatures2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
-    supported.pNext = &supported11;
+    supported.pNext = &supported12;
     vkGetPhysicalDeviceFeatures2(physical, &supported);
 
     std::uint32_t extensionCount = 0;
@@ -103,17 +101,12 @@ std::optional<VulkanHost::Admission> VulkanHost::probeAdmission(VkPhysicalDevice
     admission.pushDescriptors = hasExtension(available, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     admission.synchronization2 = supported13.synchronization2;
     admission.timelineSemaphore = supported12.timelineSemaphore;
-    admission.shaderInt64 = supported.features.shaderInt64;
-    admission.shaderInt16 = supported.features.shaderInt16;
-    admission.storageBuffer16BitAccess = supported11.storageBuffer16BitAccess;
-    admission.uniformAndStorageBuffer16BitAccess = supported11.uniformAndStorageBuffer16BitAccess;
-    admission.shaderFloat16 = supported12.shaderFloat16;
-    admission.subgroupSizeControl = supported13.subgroupSizeControl;
-    admission.computeFullSubgroups = supported13.computeFullSubgroups;
+    admission.bufferDeviceAddress = supported12.bufferDeviceAddress;
 
-    if (!admission.pushDescriptors || !admission.synchronization2 || !admission.timelineSemaphore ||
-        !admission.shaderInt64 || !admission.shaderInt16 || !admission.storageBuffer16BitAccess ||
-        admission.properties.limits.maxPushConstantsSize < requiredPushConstantBytes) {
+    if (!admission.pushDescriptors || !admission.synchronization2 || !admission.bufferDeviceAddress ||
+        admission.properties.limits.maxPushConstantsSize < requiredPushConstantBytes ||
+        admission.properties.limits.maxComputeWorkGroupInvocations < requiredWorkgroupSize ||
+        admission.properties.limits.maxComputeWorkGroupSize[0] < requiredWorkgroupSize) {
         return std::nullopt;
     }
     return admission;
@@ -150,29 +143,17 @@ void VulkanHost::createLogicalDevice(VkPhysicalDevice physical,
     auto f13 =
         vkInfo<VkPhysicalDeviceVulkan13Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
     f13.synchronization2 = VK_TRUE;
-    f13.subgroupSizeControl = admission.subgroupSizeControl;
-    f13.computeFullSubgroups = admission.computeFullSubgroups;
     auto f12 =
         vkInfo<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
     f12.pNext = &f13;
-    f12.timelineSemaphore = VK_TRUE;
-    f12.shaderFloat16 = admission.shaderFloat16;
-    auto f11 =
-        vkInfo<VkPhysicalDeviceVulkan11Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
-    f11.pNext = &f12;
-    f11.storageBuffer16BitAccess = VK_TRUE;
-    f11.uniformAndStorageBuffer16BitAccess = admission.uniformAndStorageBuffer16BitAccess;
-
-    VkPhysicalDeviceFeatures features{};
-    features.shaderInt16 = VK_TRUE;
-    features.shaderInt64 = VK_TRUE;
+    f12.timelineSemaphore = admission.timelineSemaphore;
+    f12.bufferDeviceAddress = VK_TRUE;
 
     const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
     auto info = vkInfo<VkDeviceCreateInfo>(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
     info.queueCreateInfoCount = 1;
     info.pQueueCreateInfos = &queueInfo;
-    info.pNext = &f11;
-    info.pEnabledFeatures = &features;
+    info.pNext = &f12;
     info.enabledExtensionCount = 2;
     info.ppEnabledExtensionNames = extensions;
 
@@ -201,8 +182,8 @@ void VulkanHost::attach(QQuickWindow& window) {
             return;
         }
     }
-    throw std::runtime_error("No suitable Vulkan 1.3 GPU: GS requires push descriptors, 224-byte push "
-                             "constants, int16/int64, 16-bit storage, timeline and sync2");
+    throw std::runtime_error("No suitable Vulkan 1.3 GPU: GS requires push descriptors, 128-byte push "
+                             "constants, 256-thread compute groups, buffer device addresses and sync2");
 }
 
 VulkanHost::~VulkanHost() {

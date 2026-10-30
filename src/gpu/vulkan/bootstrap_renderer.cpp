@@ -201,6 +201,7 @@ void BootstrapRenderer::createAllocator() {
     info.device = context_.device;
     info.vulkanApiVersion = VK_API_VERSION_1_3;
     info.pVulkanFunctions = &functions;
+    info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     info.pHeapSizeLimit = limits.data();
     info.preferredLargeHeapBlockSize =
         std::min<VkDeviceSize>(gpuBudgetBytes_ / allocatorBlockDivisor, maximumAllocatorBlockBytes);

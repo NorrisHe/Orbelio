@@ -92,9 +92,7 @@ Options parseOptions(QGuiApplication& app) {
     parser.addOption({"sequence-cache-mib", "Decoded sequence cache limit in MiB (default: 256).", "MiB"});
     parser.addOption(
         {"splat-budget", "Maximum Gaussians submitted per frame; 0 keeps full quality.", "count"});
-    parser.addOption({"upload-gaussians-per-frame",
-                      "GPU upload batch; 0 uploads all. Rounded up to 32 Gaussians.",
-                      "count"});
+    parser.addOption({"upload-gaussians-per-frame", "GPU upload batch; 0 uploads all.", "count"});
     parser.process(app);
     Options options{};
     options.validation = parser.isSet("validation");

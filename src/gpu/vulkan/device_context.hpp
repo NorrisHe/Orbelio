@@ -9,12 +9,25 @@ namespace orbelio {
 class VulkanError final : public std::runtime_error {
 public:
     VulkanError(VkResult result, const char* operation)
-        : std::runtime_error(std::string(operation) + " failed: " + std::to_string(result)), result_(result) {
-    }
+        : std::runtime_error(std::string(operation) + " failed: " + resultText(result)), result_(result) {}
 
     VkResult result() const { return result_; }
 
 private:
+    static std::string resultText(VkResult result) {
+        const auto code = std::to_string(result);
+        switch (result) {
+        case VK_ERROR_OUT_OF_HOST_MEMORY:
+            return "VK_ERROR_OUT_OF_HOST_MEMORY (" + code + ")";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+            return "VK_ERROR_OUT_OF_DEVICE_MEMORY (" + code + ")";
+        case VK_ERROR_DEVICE_LOST:
+            return "VK_ERROR_DEVICE_LOST (" + code + ")";
+        default:
+            return code;
+        }
+    }
+
     VkResult result_;
 };
 

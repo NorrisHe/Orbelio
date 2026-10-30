@@ -5,7 +5,6 @@
   "dependencies": [
     "volk",
     "vulkan-memory-allocator",
-    "shader-slang",
     "zlib",
     "zstd",
     { "name": "libarchive", "default-features": false, "features": ["zstd"] },

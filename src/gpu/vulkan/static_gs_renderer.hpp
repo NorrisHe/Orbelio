@@ -6,7 +6,7 @@
 #include <memory>
 
 namespace orbelio {
-// Temporary GPL backend adapter. Replacement boundary: no LFS types leave this header.
+// Native EWA projection, stable GPU sorting and ordered floating-point alpha compositing.
 class StaticGsRenderer final : public IGaussianRenderer {
 public:
     StaticGsRenderer(DeviceContext context, VmaAllocator allocator, std::string shaderDirectory = {});

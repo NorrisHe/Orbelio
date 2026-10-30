@@ -1,0 +1,24 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_sort_parameters.glsl"
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer Histogram { uint histogram[]; };
+layout(set=0,binding=1,std430) writeonly buffer Prefix { uint prefix[]; };
+layout(set=0,binding=2,std430) writeonly buffer Totals { uint totals[]; };
+shared uint sums[groupSize];
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    uint block = gl_WorkGroupID.x*groupSize+local;
+    uint bin = gl_WorkGroupID.y;
+    uint value = block < p.groups ? histogram[block*radix+bin] : 0;
+    sums[local] = value;
+    barrier();
+    for (uint step=1; step<groupSize; step*=2) {
+        uint add = local >= step ? sums[local-step] : 0;
+        barrier();
+        sums[local] += add;
+        barrier();
+    }
+    if (block < p.groups) prefix[block*radix+bin] = sums[local]-value;
+    if (local == groupSize-1) totals[bin*p.chunks+gl_WorkGroupID.x] = sums[local];
+}

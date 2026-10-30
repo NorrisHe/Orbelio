@@ -51,11 +51,6 @@ function Copy-Notices([string]$Directory) {
     $taskNotices = Join-Path $Directory 'licenses'
     New-Item -ItemType Directory -Path $taskNotices -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $taskRoot 'src\apps\viewer\assets\icons\LICENSE') -Destination (Join-Path $taskNotices 'icons-LICENSE')
-    $taskVendor = Join-Path $taskNotices 'lichtfeld-vulkan'
-    New-Item -ItemType Directory -Path $taskVendor -Force | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $taskRoot 'third_party\lichtfeld_vulkan') -File |
-        Where-Object Name -Match '^(COPYING|LICENSE)' | Copy-Item -Destination $taskVendor
-    Copy-Item -LiteralPath (Join-Path $taskRoot 'third_party\lichtfeld_vulkan\shader\src\radix_sort\LICENSE') -Destination (Join-Path $taskNotices 'radix-sort-LICENSE')
     $taskShare = Join-Path $taskRoot '.tools\installed\x64-mingw-dynamic\share'
     Get-ChildItem -LiteralPath $taskShare -Directory | ForEach-Object {
         $taskCopyright = Join-Path $_.FullName 'copyright'

@@ -328,7 +328,7 @@ void AppModel::addFrameSamples(const FrameStats& stats) {
     add("qtCompositionCpuSpanMs", std::max(0., stats.completeFrameMs - stats.cpuSubmitMs));
     add("gpuPreprocessMs", stats.projectionGpuMs);
     add("gpuDepthSortMs", stats.sortingGpuMs);
-    add("gpuRasterAndTileSortMs", stats.rasterGpuMs);
+    add("gpuRasterMs", stats.rasterGpuMs);
     add("gpuImageComposeMs", stats.composeGpuMs);
     add("gpuGsStagesMs", stats.gpuRenderMs);
     add("temporalEvaluationCpuMs", stats.temporalEvaluationCpuMs);
@@ -351,7 +351,7 @@ QVariantMap AppModel::resourceRows(const BackendStats& backend) const {
     auto row = [&](QString name, QString value) { rows[name] = std::move(value); };
     row("Model buffers", mebibytes(backend.modelBytes));
     row("Preprocess buffers", mebibytes(backend.preprocessingBytes));
-    row("Sort / tile scratch", mebibytes(backend.sortingBytes));
+    row("Sort scratch", mebibytes(backend.sortingBytes));
     row("Pixel buffers + target", mebibytes(backend.pixelBytes + backend.imageReservedBytes));
     row("Statistics / capture", mebibytes(backend.telemetryBytes));
     row("GS reserved / growths",
@@ -376,20 +376,13 @@ void AppModel::refreshPerformancePanel(const FrameReport& report) {
     const auto& backend = report.backend;
     const auto interval = metrics_.find("completedIntervalMs");
     const auto mean = interval == metrics_.end() ? std::optional<double>{} : interval->second.mean();
-    performance_ = {{"gaussians", QVariant::fromValue<qulonglong>(frame.gaussianCount)},
-                    {"tileInstances",
-                     backend.telemetryReferences
-                         ? QVariant::fromValue<qulonglong>(*backend.telemetryReferences)
-                         : QVariant()},
-                    {"depthWaves", QVariant::fromValue<qulonglong>(backend.depthWaves)}};
+    performance_ = {{"gaussians", QVariant::fromValue<qulonglong>(frame.gaussianCount)}};
     performance_["fps"] = mean && *mean > 0 ? QVariant(millisecondsPerSecond / *mean) : QVariant();
     performance_["timingRows"] = timingRows();
     performance_["samples"] =
         static_cast<int>(metrics_.contains("completeFrameMs") ? metrics_.at("completeFrameMs").count() : 0);
     performance_["visible"] =
         backend.visibleGaussians ? QVariant::fromValue<qulonglong>(*backend.visibleGaussians) : QVariant();
-    performance_["maxTile"] =
-        backend.maxTileList ? QVariant::fromValue<qulonglong>(*backend.maxTileList) : QVariant();
     performance_["resourceRows"] = resourceRows(backend);
     performance_["submittedGaussians"] = QVariant::fromValue<qulonglong>(frame.submittedGaussians);
     performance_["budgetedGaussians"] = QVariant::fromValue<qulonglong>(frame.budgetedGaussians);

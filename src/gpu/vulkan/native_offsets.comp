@@ -1,0 +1,20 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_sort_parameters.glsl"
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer Totals { uint totals[]; };
+layout(set=0,binding=1,std430) writeonly buffer Offsets { uint offsets[]; };
+shared uint binTotals[radix];
+void main() {
+    uint bin = gl_LocalInvocationIndex;
+    uint sum = 0;
+    for (uint chunk=0; chunk<p.chunks; ++chunk) {
+        offsets[bin*p.chunks+chunk] = sum;
+        sum += totals[bin*p.chunks+chunk];
+    }
+    binTotals[bin] = sum;
+    barrier();
+    uint base = 0;
+    for (uint previous=0; previous<bin; ++previous) base += binTotals[previous];
+    for (uint chunk=0; chunk<p.chunks; ++chunk) offsets[bin*p.chunks+chunk] += base;
+}

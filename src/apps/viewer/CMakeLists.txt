@@ -17,16 +17,10 @@ qt_add_qml_module(orbelio_viewer URI Orbelio VERSION 1.0
 qt_add_resources(orbelio_viewer viewer_sample PREFIX "/samples" BASE "${PROJECT_SOURCE_DIR}/samples"
     FILES "${PROJECT_SOURCE_DIR}/samples/guitar/guitar.compressed.ply")
 set_target_properties(orbelio_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-get_target_property(viewer_backend_shader_directory lfs_vulkan_rasterizer LFS_VULKAN_RASTERIZER_SPV_DIR)
+get_target_property(viewer_shader_binaries orbelio_vulkan ORBELIO_SHADER_BINARIES)
 add_custom_target(orbelio_viewer_shaders ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:orbelio_viewer>/shaders"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_PROPERTY:orbelio_vulkan,BINARY_DIR>/compose.spv"
-        "$<TARGET_PROPERTY:orbelio_vulkan,BINARY_DIR>/tile_stats.spv"
-        "$<TARGET_PROPERTY:orbelio_vulkan,BINARY_DIR>/attributes.spv"
+        ${viewer_shader_binaries}
         "$<TARGET_FILE_DIR:orbelio_viewer>/shaders"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${viewer_backend_shader_directory}/generated" "$<TARGET_FILE_DIR:orbelio_viewer>/shaders/generated"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${viewer_backend_shader_directory}/radix_sort" "$<TARGET_FILE_DIR:orbelio_viewer>/shaders/radix_sort"
     DEPENDS orbelio_viewer VERBATIM)

@@ -1,0 +1,17 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_sort_parameters.glsl"
+#include "native_sort_votes.glsl"
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer Keys { uint keys[]; };
+layout(set=0,binding=1,std430) writeonly buffer Histogram { uint histogram[]; };
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    bool valid = index < p.count;
+    uint digit = valid ? (keys[index] >> p.shift) & 255u : 0;
+    buildVotes(valid,digit);
+    uint bin = gl_LocalInvocationIndex;
+    uint total = 0;
+    for (uint word=0; word<maskWords; ++word) total += bitCount(votes[bin*maskWords+word]);
+    histogram[gl_WorkGroupID.x*radix+bin] = total;
+}

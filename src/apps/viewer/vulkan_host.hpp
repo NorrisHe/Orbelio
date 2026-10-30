@@ -33,13 +33,7 @@ private:
         bool pushDescriptors = false;
         bool synchronization2 = false;
         bool timelineSemaphore = false;
-        bool shaderInt64 = false;
-        bool shaderInt16 = false;
-        bool storageBuffer16BitAccess = false;
-        bool uniformAndStorageBuffer16BitAccess = false;
-        bool shaderFloat16 = false;
-        bool subgroupSizeControl = false;
-        bool computeFullSubgroups = false;
+        bool bufferDeviceAddress = false;
     };
 
     // Instance bootstrap, in the order Vulkan 1.3 + Qt require: choose layers and extensions,

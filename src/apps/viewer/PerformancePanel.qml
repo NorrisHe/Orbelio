@@ -15,12 +15,12 @@ Rectangle {
         ["全部 GPU 等待", "allGpuWaitsMs"], ["查询读回", "queryReadbackCpuMs"],
         ["CPU 时间条件化", "temporalEvaluationCpuMs"],
         ["GPU 预处理", "gpuPreprocessMs"], ["GPU 深度排序", "gpuDepthSortMs"],
-        ["GPU 光栅与瓦片排序", "gpuRasterAndTileSortMs"], ["GPU 图像合成", "gpuImageComposeMs"],
+        ["GPU 光栅", "gpuRasterMs"], ["GPU 图像合成", "gpuImageComposeMs"],
         ["GPU GS 阶段合计", "gpuGsStagesMs"]
     ]
     readonly property var allocations: [
         ["模型", "Model buffers"], ["预处理", "Preprocess buffers"],
-        ["排序与瓦片临时资源", "Sort / tile scratch"], ["像素与视口目标", "Pixel buffers + target"],
+        ["排序临时资源", "Sort scratch"], ["像素与视口目标", "Pixel buffers + target"],
         ["统计与截图", "Statistics / capture"], ["GS 预留 / 扩容", "GS reserved / growths"],
         ["VMA 使用 / 预留", "VMA used / reserved"], ["VMA 使用峰值", "VMA used peak"],
         ["输入使用 / 预留", "Input active / reserved"], ["输入峰值 / 分配", "Input peak / allocations"],
@@ -151,8 +151,7 @@ Rectangle {
             }
             Rectangle { height: 1; Layout.fillWidth: true; color: editor.rule }
             Repeater {
-                model: [["Gaussian", "gaussians"], ["可见", "visible"], ["瓦片引用", "tileInstances"],
-                        ["最大瓦片列表", "maxTile"], ["深度波次", "depthWaves"]]
+                model: [["Gaussian", "gaussians"], ["可见", "visible"]]
                 RowLayout {
                     required property var modelData
                     Layout.fillWidth: true

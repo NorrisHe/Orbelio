@@ -1,0 +1,143 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define PROJECT_SPLATS
+#include "native_splat.glsl"
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) writeonly buffer DepthKeys { uint keys[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Indices { uint indices[]; };
+layout(set = 0, binding = 2, std430) buffer Counters { uint visibleCount; };
+layout(push_constant) uniform Parameters {
+    vec4 right;
+    vec4 down;
+    vec4 forward;
+    vec4 eye;
+    vec4 viewport;
+    uvec4 controls;
+    Positions positions;
+    Orientations orientations;
+    Harmonics harmonics;
+    Projected projected;
+} p;
+
+const float alphaCutoff = 0.5 / 255.0;
+const float dilation = 0.3;
+const float maximumRadius = 512.5;
+
+mat3 orientation(vec4 q) {
+    q = normalize(q);
+    float w = q.x;
+    float x = q.y;
+    float y = q.z;
+    float z = q.w;
+    return mat3(vec3(1 - 2 * (y*y + z*z), 2 * (x*y + w*z), 2 * (x*z - w*y)),
+                vec3(2 * (x*y - w*z), 1 - 2 * (x*x + z*z), 2 * (y*z + w*x)),
+                vec3(2 * (x*z + w*y), 2 * (y*z - w*x), 1 - 2 * (x*x + y*y)));
+}
+
+vec3 color(uint index, vec3 relative) {
+    vec3 v = normalize(relative);
+    float x = v.x;
+    float y = v.y;
+    float z = v.z;
+    float basis[15] = float[](-0.4886025119*y, 0.4886025119*z, -0.4886025119*x,
+        1.0925484306*x*y, -1.0925484306*y*z, 0.3153915653*(3*z*z-1),
+        -1.0925484306*x*z, 0.5462742153*(x*x-y*y),
+        -0.5900435899*y*(3*x*x-y*y), 2.8906114426*x*y*z,
+        -0.4570457995*y*(5*z*z-1), 0.3731763326*z*(5*z*z-3),
+        -0.4570457995*x*(5*z*z-1), 1.4453057213*z*(x*x-y*y),
+        -0.5900435899*x*(x*x-3*y*y));
+    uint coefficients = (p.controls.y + 1) * (p.controls.y + 1);
+    uint first = index * coefficients * 3;
+    vec3 result = vec3(0.5);
+    for (uint channel = 0; channel < 3; ++channel) {
+        result[channel] += 0.2820947918 * p.harmonics.values[first + channel];
+        for (uint coefficient = 1; coefficient < coefficients; ++coefficient)
+            result[channel] += basis[coefficient - 1] * p.harmonics.values[first + coefficient*3 + channel];
+    }
+    return clamp(result, vec3(0), vec3(4));
+}
+
+vec2 boundedProjection(vec2 value) {
+    // Scales up to exp(40) must stay finite before the eigenvalue radius clamp.
+    float largest = max(abs(value.x), abs(value.y));
+    return value * min(1.0, 1e14 / max(largest, 1e-20));
+}
+
+vec3 covariance(mat3 rotation, vec3 scales, vec3 point) {
+    float focal = p.viewport.z;
+    vec2 slope = clamp(point.xy / point.z, -0.65*p.viewport.xy/focal, 0.65*p.viewport.xy/focal);
+    vec3 jx = focal / point.z * (p.right.xyz - slope.x * p.forward.xyz);
+    vec3 jy = focal / point.z * (p.down.xyz - slope.y * p.forward.xyz);
+    vec3 cov = vec3(0);
+    for (uint axis = 0; axis < 3; ++axis) {
+        vec2 projected = boundedProjection(vec2(dot(jx, rotation[axis]), dot(jy, rotation[axis])) * exp(scales[axis]));
+        cov += vec3(projected.x*projected.x, projected.x*projected.y, projected.y*projected.y);
+    }
+    return cov;
+}
+
+vec3 clampCovariance(vec3 cov, float power) {
+    vec2 difference = vec2((cov.x-cov.z)*0.5, cov.y);
+    float scale = max(abs(difference.x), abs(difference.y));
+    float delta = scale == 0 ? 0 : scale * length(difference / scale);
+    float mean = (cov.x+cov.z)*0.5;
+    float limit = maximumRadius*maximumRadius / (2*power);
+    if (mean+delta <= limit) return cov;
+    float angle = scale == 0 ? 0 : 0.5 * atan(2*cov.y, cov.x-cov.z);
+    float cosine = cos(angle);
+    float sine = sin(angle);
+    float major = min(mean+delta, limit);
+    float minor = min(max(dilation, mean-delta), limit);
+    return vec3(major*cosine*cosine+minor*sine*sine,
+                (major-minor)*cosine*sine, major*sine*sine+minor*cosine*cosine);
+}
+
+float mipCompensation(vec3 cov) {
+    float scale = max(cov.x, cov.z);
+    if (scale == 0) return 0;
+    vec3 normalized = cov / scale;
+    float determinant = max(0.0, normalized.x*normalized.z-normalized.y*normalized.y);
+    float blur = dilation / scale;
+    return sqrt(determinant / (determinant+blur*(normalized.x+normalized.z)+blur*blur));
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= p.controls.x) return;
+    indices[index] = index;
+    keys[index] = 0xffffffffu;
+    p.projected.values[index].color = vec4(0, 0, 0, -1);
+    vec4 position = p.positions.values[index];
+    vec3 relative = position.xyz-p.eye.xyz;
+    vec3 point = vec3(dot(relative,p.right.xyz), dot(relative,p.down.xyz), dot(relative,p.forward.xyz));
+    if (point.z <= 0.01) return;
+    vec2 mean = p.viewport.z*point.xy/point.z + p.viewport.xy*0.5;
+    if (any(lessThan(mean, -0.2*p.viewport.xy)) || any(greaterThan(mean, 1.2*p.viewport.xy))) return;
+    vec3 scales = p.orientations.values[index*2+1].xyz;
+    vec3 cov = covariance(orientation(p.orientations.values[index*2]), scales, point);
+    float sourceOpacity = 1.0/(1.0+exp(-position.w));
+    float opacity = sourceOpacity;
+    if ((p.controls.w & 1u) != 0)
+        opacity *= mipCompensation(cov);
+    cov += vec3(dilation, 0, dilation);
+    if (opacity < alphaCutoff) return;
+    float power = max(4.0, log(opacity/alphaCutoff));
+    cov = clampCovariance(cov, power);
+    float determinant = cov.x*cov.z-cov.y*cov.y;
+    if (determinant <= 0) return;
+    vec2 radius = sqrt(2*power*cov.xz);
+    if (any(lessThan(mean+radius, vec2(0))) || any(greaterThan(mean-radius, p.viewport.xy))) return;
+    vec3 rgb;
+    if (p.controls.z == 0) rgb = color(index, relative);
+    else {
+        float value = p.controls.z == 1 ? point.z : p.controls.z == 2 ? sourceOpacity : max(scales.x,max(scales.y,scales.z));
+        float gray = p.controls.z == 2 ? value : (value-p.right.w)/(p.down.w-p.right.w);
+        rgb = vec3(clamp(gray,0,1));
+    }
+    p.projected.values[index].rectangle = vec4(mean, radius);
+    p.projected.values[index].conicOpacity = vec4(cov.z/determinant,-cov.y/determinant,cov.x/determinant,opacity);
+    p.projected.values[index].color = vec4(rgb,1);
+    keys[index] = floatBitsToUint(point.z);
+    if ((p.controls.w & 2u) != 0) atomicAdd(visibleCount,1);
+}

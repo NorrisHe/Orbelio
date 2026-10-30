@@ -1,0 +1,22 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_sort_parameters.glsl"
+#include "native_sort_votes.glsl"
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer Keys { uint keys[]; };
+layout(set=0,binding=1,std430) readonly buffer Values { uint values[]; };
+layout(set=0,binding=2,std430) readonly buffer Prefix { uint prefix[]; };
+layout(set=0,binding=3,std430) readonly buffer Offsets { uint offsets[]; };
+layout(set=0,binding=4,std430) writeonly buffer SortedKeys { uint sortedKeys[]; };
+layout(set=0,binding=5,std430) writeonly buffer SortedValues { uint sortedValues[]; };
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    bool valid = index < p.count;
+    uint digit = valid ? (keys[index] >> p.shift) & 255u : 0;
+    buildVotes(valid,digit);
+    if (!valid) return;
+    uint group = gl_WorkGroupID.x;
+    uint destination = prefix[group*radix+digit] + offsets[digit*p.chunks+group/groupSize] + stableRank(digit);
+    sortedKeys[destination] = keys[index];
+    sortedValues[destination] = values[index];
+}
