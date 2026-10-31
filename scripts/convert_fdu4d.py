@@ -83,14 +83,17 @@ def condition(scales, left, right):
 class FduCheckpointConverter:
     def __init__(self, checkpoint, force_sh_3d):
         import torch
-        saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        with torch.serialization.safe_globals([np._core.multiarray.scalar, np.dtype,
+                                               np.dtypes.Float32DType, np.dtypes.Float64DType]):
+            saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
         require(isinstance(saved, (tuple, list)) and len(saved) == 2, "Expected (GaussianModel.capture(), iteration)")
         state, self.iteration = saved
         require(isinstance(state, (tuple, list)) and len(state) == 19, "Expected official 19-field native 4D checkpoint")
         require(isinstance(state[0], int) and 0 <= state[0] <= 3, "Unsupported active spatial SH degree")
         require(isinstance(state[18], int) and 0 <= state[18] <= 2, "Unsupported active temporal SH degree")
         require(isinstance(state[16], bool), "Invalid rot_4d flag")
-        require(isinstance(state[17], torch.Tensor) and state[17].numel() == 0, "Environment maps are not supported")
+        require(state[17] is None or (isinstance(state[17], torch.Tensor) and state[17].numel() == 0),
+                "Environment maps are not supported")
         require(not force_sh_3d or state[18] == 0, "force_sh_3d conflicts with active temporal SH")
         self.state = state
         self.degree = state[0]
