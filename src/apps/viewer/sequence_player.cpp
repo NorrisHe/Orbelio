@@ -121,20 +121,10 @@ void SequencePlayer::seek(double seconds) {
         const auto target = fdu4d_ ? fdu4d_->clampTime(seconds) : sequence_->clampTime(seconds);
         const auto index = fdu4d_ ? std::size_t(fdu4d_->sampleAt(target)) : sequence_->frameAt(target);
         beginSeek(fdu4d_ ? target : sequence_->frames[index].timestampSeconds, index, retry);
-        if (fdu4d_) {
+        if (retry && !pending_ && (fdu4d_ || (!readPending_ && index == displayedIndex_))) {
             requestedTime_ = target;
-            desiredIndex_ = std::size_t(fdu4d_->sampleAt(target));
-            if (retry && !pending_) {
-                present(desiredIndex_, {});
-                return;
-            }
-            request(target);
-            return;
-        }
-        if (retry && !pending_ && !readPending_ && sequence_->frameAt(target) == displayedIndex_) {
-            requestedTime_ = target;
-            desiredIndex_ = displayedIndex_;
-            present(displayedIndex_, viewport_.content().scene);
+            desiredIndex_ = index;
+            present(index, viewport_.content().scene);
             return;
         }
         request(target);
@@ -217,16 +207,13 @@ void SequencePlayer::makeReadHeadroom() {
                 oldest = candidate;
             }
         }
-        if (oldest == cache_.end()) {
-            break;
-        }
         evict(oldest);
     }
 }
 
 void SequencePlayer::finishRead(std::uint64_t generation, std::size_t index, SceneLoadResult result) {
     readPending_ = false;
-    if (generation != generation_ || !active() || suspended_) {
+    if (generation != generation_) {
         result.scene.reset();
         result.fdu4d.reset();
         dispatch();

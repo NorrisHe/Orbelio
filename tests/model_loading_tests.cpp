@@ -64,8 +64,7 @@ struct Fixture {
     ManualExecutor completions;
     orbelio::SceneLoader loader{worker, completions, reader, pool};
     orbelio::ViewportState viewport;
-    std::unique_ptr<orbelio::AppModel> model =
-        std::make_unique<orbelio::AppModel>(false, loader, viewport, pool);
+    std::unique_ptr<orbelio::AppModel> model = std::make_unique<orbelio::AppModel>(loader, viewport, pool);
 
     void completeRead() {
         worker.runOne();
@@ -267,6 +266,22 @@ void inspectorTracksCommittedAssetsAndRangeSettings() {
     fixture.model->unloadModel();
     require(fixture.model->inspector().isEmpty(), "Unloaded Inspector retained the old model");
 }
+
+void deviceLossStopsPlaybackAndRejectsFurtherLoads() {
+    Fixture fixture;
+    fixture.loadReady(guitarPath);
+    orbelio::FrameReport failure{};
+    failure.frame.sceneVersion = fixture.viewport.sceneVersion();
+    failure.frame.failure = orbelio::RenderFailure::DeviceLost;
+    fixture.model->acceptFrame(failure, "vkQueueSubmit failed: -4");
+    require(fixture.model->loadState() == "Error" && !fixture.model->hasScene() &&
+                fixture.model->ioStatus().contains("device lost") &&
+                fixture.model->ioStatus().contains("Restart"),
+            "Device loss was treated as a recoverable model-capacity error");
+    fixture.model->loadModel(bikerPath);
+    require(fixture.worker.tasks.empty() && fixture.model->loadState() == "Error",
+            "A lost device retried rendering without a new device");
+}
 }
 
 int main(int argc, char** argv) {
@@ -280,6 +295,7 @@ int main(int argc, char** argv) {
         failedUploadRestoresThePreviousSceneAndCamera();
         closingDropsLateCompletions();
         inspectorTracksCommittedAssetsAndRangeSettings();
+        deviceLossStopsPlaybackAndRejectsFurtherLoads();
         std::cout << "Model loading, coalescing, stale frames, budgets, recovery and shutdown: PASS\n";
         return 0;
     } catch (const std::exception& error) {

@@ -15,20 +15,16 @@ constexpr double millisecondsPerSecond = 1000.;
 QString mebibytes(std::size_t bytes) { return QString::number(double(bytes) / mebibyte, 'f', 2) + " MiB"; }
 } // namespace
 
-AppModel::AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool)
-    : validation_(validation), sceneLoader_(sceneLoader), viewport_(viewport), cpuPool_(cpuPool),
+AppModel::AppModel(SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool)
+    : sceneLoader_(sceneLoader), viewport_(viewport), cpuPool_(cpuPool),
       sequencePlayer_(sceneLoader, viewport, this) {
     connect(&sequencePlayer_, &SequencePlayer::frameRequested, this, &AppModel::frameRequested);
     connect(&sequencePlayer_, &SequencePlayer::frameRequested, this, &AppModel::changed);
     connect(this, &AppModel::changed, this, &AppModel::inspectorChanged);
 }
 
-QString AppModel::budgetDescription() const {
-    const auto& limits = sceneLoader_.limits();
-    return "Input pool: " + mebibytes(limits.inputBytes) +
-           ". Decode/workspace: " + mebibytes(limits.decodedBytes) +
-           "/model. CPU scenes + queued results: " + mebibytes(limits.residentBytes) +
-           ". GPU allocations/blocks: " + mebibytes(limits.gpuBytes) + ". Qt and driver excluded.";
+QString AppModel::modelName() const {
+    return modelPath_.isEmpty() ? QStringLiteral("No model") : QFileInfo(modelPath_).fileName();
 }
 
 QVariantMap AppModel::inspector() const {
@@ -121,7 +117,6 @@ void AppModel::restoreLastScene() {
     viewport_.restoreContent(previousScene_->content);
     viewport_.setCamera(previousScene_->camera);
     modelPath_ = previousScene_->path;
-    modelName_ = previousScene_->name;
     previousScene_.reset();
     sequencePlayer_.resume();
     resetMeasurements();
@@ -192,7 +187,7 @@ void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
         performance_.clear();
         lastUiRefresh_ = {};
         if (!previousScene_) {
-            previousScene_ = DisplayedScene{viewport_.content(), viewport_.camera(), modelPath_, modelName_};
+            previousScene_ = DisplayedScene{viewport_.content(), viewport_.camera(), modelPath_};
         }
         if (result.fdu4d) {
             viewport_.setFdu4d(std::move(result.fdu4d));
@@ -205,9 +200,8 @@ void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
                                        pendingSequence_->frames.front().timestampSeconds);
         }
         modelPath_ = path;
-        modelName_ = QFileInfo(path).fileName();
         uploadPendingVersion_ = viewport_.sceneVersion();
-        ioStatus_ = "Preparing " + modelName_ + " for display...";
+        ioStatus_ = "Preparing " + modelName() + " for display...";
         Q_EMIT sceneLoaded(result.ioMilliseconds);
         Q_EMIT sceneChanged();
     } else {
@@ -218,6 +212,9 @@ void AppModel::completeModelLoad(const QString& path, SceneLoadResult result) {
 }
 
 void AppModel::loadModel(const QString& path) {
+    if (deviceLost_) {
+        return;
+    }
     sequencePlayer_.setPlaying(false);
     pendingRequest_ = LoadRequest{++requestGeneration_, path};
     uploadPendingVersion_.reset();
@@ -280,7 +277,6 @@ void AppModel::unloadModel() {
     uploadPendingVersion_.reset();
     previousScene_.reset();
     viewport_.setScene({});
-    modelName_ = "No model";
     modelPath_.clear();
     loadState_ = LoadState::Empty;
     ioStatus_ = readPending_ ? "Unloaded; finishing an obsolete IO request" : "No model loaded";
@@ -401,6 +397,14 @@ void AppModel::refreshPerformancePanel(const FrameReport& report) {
 }
 
 void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
+    if (report.frame.failure == RenderFailure::DeviceLost) {
+        deviceLost_ = true;
+        unloadModel();
+        loadState_ = LoadState::Error;
+        ioStatus_ = "Vulkan device lost: " + error + ". Restart the viewer.";
+        Q_EMIT changed();
+        return;
+    }
     const auto generation = requestGeneration_;
     const auto sequenceFrame = sequencePlayer_.acceptFrame(report.frame, error);
     if (generation != requestGeneration_) {

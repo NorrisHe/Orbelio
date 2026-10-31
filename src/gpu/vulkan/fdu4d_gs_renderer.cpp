@@ -13,13 +13,11 @@ void Fdu4dGsRenderer::render(const FrameState& frame,
     const auto start = std::chrono::steady_clock::now();
     const auto time = frame.fdu4d->clampTime(frame.timestampSeconds);
     const auto count = frame.renderSettings.budgetedCount(frame.fdu4d->count());
-    const bool changed = source_ != frame.fdu4d || !evaluated_ || time_ != time || count_ != count;
+    const bool changed = source_ != frame.fdu4d || time_ != time || evaluated_->count() != count;
     if (changed) {
-        auto next = std::make_shared<StaticScene>(evaluateFdu4d(*frame.fdu4d, time, count));
-        evaluated_ = std::move(next);
+        evaluated_ = std::make_shared<StaticScene>(evaluateFdu4d(*frame.fdu4d, time, count));
         source_ = frame.fdu4d;
         time_ = time;
-        count_ = count;
     }
     const auto evaluationMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();

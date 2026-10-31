@@ -38,7 +38,12 @@ public:
     }
 
     std::optional<double> percentile(double p) const {
-        auto sorted = values();
+        std::vector<double> sorted;
+        for (auto sample : samples_) {
+            if (sample) {
+                sorted.push_back(*sample);
+            }
+        }
         if (sorted.empty()) {
             return {};
         }
@@ -49,16 +54,6 @@ public:
     }
 
 private:
-    std::vector<double> values() const {
-        std::vector<double> result;
-        for (auto sample : samples_) {
-            if (sample) {
-                result.push_back(*sample);
-            }
-        }
-        return result;
-    }
-
     std::vector<std::optional<double>> samples_;
     std::size_t cursor_ = 0;
     std::size_t validCount_ = 0;

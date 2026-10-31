@@ -80,8 +80,6 @@ public:
 
     std::size_t usedBytes() const { return state_->used.load(); }
 
-    std::size_t limitBytes() const { return state_->limit; }
-
 private:
     std::shared_ptr<State> state_;
 };

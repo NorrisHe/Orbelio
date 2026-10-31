@@ -6,6 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(CTest)
+if(WIN32)
+    # vcpkg post-link deployment writes DLLs into a shared output directory.
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS orbelio_link=1)
+    set(CMAKE_JOB_POOL_LINK orbelio_link)
+endif()
 option(ORBELIO_ENABLE_TRACY "Enable Tracy instrumentation (adds profiler helper thread)" OFF)
 option(ORBELIO_BUILD_VIEWER "Build the Qt/Vulkan application and platform adapters" ON)
 

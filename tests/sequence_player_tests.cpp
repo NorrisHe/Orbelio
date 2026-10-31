@@ -93,7 +93,7 @@ struct Fixture {
     std::uint64_t uploads = 0;
 
     explicit Fixture(orbelio::ModelLimits limits = {})
-        : loader(worker, completions, reader, pool, limits), model(false, loader, viewport, pool) {
+        : loader(worker, completions, reader, pool, limits), model(loader, viewport, pool) {
         std::string manifest =
             R"({"schema":"orbelio.ply-sequence","version":1,"endTimeSeconds":3.2,"frames":[)";
         for (int frame = 0; frame < 30; ++frame) {

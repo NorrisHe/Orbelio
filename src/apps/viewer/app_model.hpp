@@ -20,7 +20,6 @@ namespace orbelio {
 class AppModel final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString gpuName READ gpuName CONSTANT)
-    Q_PROPERTY(bool validation READ validation CONSTANT)
     Q_PROPERTY(QString ioStatus READ ioStatus NOTIFY changed)
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY changed)
     Q_PROPERTY(QVariantMap inspector READ inspector NOTIFY inspectorChanged)
@@ -31,23 +30,16 @@ class AppModel final : public QObject {
     Q_PROPERTY(bool loading READ isLoading NOTIFY changed)
     Q_PROPERTY(bool hasScene READ hasScene NOTIFY changed)
     Q_PROPERTY(QString modelName READ modelName NOTIFY changed)
-    Q_PROPERTY(QString modelPath READ modelPath NOTIFY changed)
-    Q_PROPERTY(unsigned shDegree READ shDegree NOTIFY changed)
-    Q_PROPERTY(QString sceneFormat READ sceneFormat NOTIFY changed)
-    Q_PROPERTY(QString budgetDescription READ budgetDescription CONSTANT)
-    Q_PROPERTY(qulonglong gaussianCount READ gaussianCount NOTIFY changed)
     Q_PROPERTY(QObject* timeline READ timeline CONSTANT)
     Q_PROPERTY(int maxGaussians READ maxGaussians WRITE setMaxGaussians NOTIFY renderSettingsChanged)
     Q_PROPERTY(int uploadGaussiansPerFrame READ uploadGaussiansPerFrame WRITE setUploadGaussiansPerFrame
                    NOTIFY renderSettingsChanged)
 public:
-    AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool);
+    AppModel(SceneLoader& sceneLoader, ViewportState& viewport, BytePool& cpuPool);
 
     QString gpuName() const { return gpuName_; }
 
     void setGpuName(QString name) { gpuName_ = std::move(name); } // before QML creation
-
-    bool validation() const { return validation_; }
 
     QString ioStatus() const { return ioStatus_; }
 
@@ -70,17 +62,13 @@ public:
 
     bool hasScene() const { return viewport_.hasScene(); }
 
-    QString modelName() const { return modelName_; }
+    QString modelName() const;
 
     QString modelPath() const { return modelPath_; }
 
     qulonglong gaussianCount() const { return viewport_.gaussianCount(); }
 
     unsigned shDegree() const { return viewport_.shDegree(); }
-
-    QString sceneFormat() const { return QString::fromStdString(viewport_.sceneFormat()); }
-
-    QString budgetDescription() const;
 
     QObject* timeline() { return &sequencePlayer_; }
 
@@ -136,7 +124,6 @@ private:
     unsigned sceneFrames_ = 0;
     QString gpuName_;
     QString ioStatus_ = "Idle";
-    QString modelName_ = "No model";
     QString modelPath_;
     LoadState loadState_ = LoadState::Empty;
     std::uint64_t requestGeneration_ = 0;
@@ -146,13 +133,12 @@ private:
         ViewportState::ContentSnapshot content;
         CameraState camera;
         QString path;
-        QString name;
     };
 
     std::optional<DisplayedScene> previousScene_;
     std::optional<LoadRequest> pendingRequest_;
     std::optional<std::uint64_t> uploadPendingVersion_;
-    bool validation_;
+    bool deviceLost_ = false;
     SceneLoader& sceneLoader_;
     ViewportState& viewport_;
     BytePool& cpuPool_;

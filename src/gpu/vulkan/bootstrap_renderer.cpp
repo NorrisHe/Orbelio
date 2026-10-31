@@ -1,5 +1,6 @@
 #include "bootstrap_renderer.hpp"
-#include "gaussian_renderer.hpp"
+#include "static_gs_renderer.hpp"
+#include "fdu4d_gs_renderer.hpp"
 #ifdef ORBELIO_TRACY_ENABLED
 #include <tracy/Tracy.hpp>
 #endif
@@ -135,8 +136,10 @@ std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heapBudgetLimits(DeviceContext con
 }
 } // namespace
 
-BootstrapRenderer::BootstrapRenderer(DeviceContext context, std::size_t gpuBudgetBytes)
-    : context_(context), gpuBudgetBytes_(gpuBudgetBytes) {
+BootstrapRenderer::BootstrapRenderer(DeviceContext context,
+                                     std::size_t gpuBudgetBytes,
+                                     std::string shaderDirectory)
+    : context_(context), gpuBudgetBytes_(gpuBudgetBytes), shaderDirectory_(std::move(shaderDirectory)) {
     try {
         createAllocator();
         createCommandResources();
@@ -314,12 +317,16 @@ void BootstrapRenderer::render(const FrameState& state) {
 }
 
 void BootstrapRenderer::renderGaussians(const FrameState& state) {
-    const auto kind = GaussianRendererFactory::kind(state);
-    if (!gs_ || gsKind_ != kind) {
+    const bool usesFdu4d = bool(state.fdu4d);
+    if (!gs_ || gsUsesFdu4d_ != usesFdu4d) {
         gs_.reset();
         clearSceneReport(report_);
-        gs_ = GaussianRendererFactory::create(kind, context_, allocator_);
-        gsKind_ = kind;
+        if (usesFdu4d) {
+            gs_ = std::make_unique<Fdu4dGsRenderer>(context_, allocator_, shaderDirectory_);
+        } else {
+            gs_ = std::make_unique<StaticGsRenderer>(context_, allocator_, shaderDirectory_);
+        }
+        gsUsesFdu4d_ = usesFdu4d;
     }
     gs_->render(state, image_, imageView_, imageHasContent_, report_);
     imageHasContent_ = true;
@@ -396,12 +403,11 @@ FrameReport BootstrapRenderer::finishFrame() {
     const auto completed = Clock::now();
     auto& frame = report_.frame;
     frame.completeFrameMs = std::chrono::duration<double, std::milli>(completed - frameStart_).count();
-    if (hasPreviousCompletion_) {
+    if (frame.frameIndex > 1) {
         frame.frameIntervalMs =
             std::chrono::duration<double, std::milli>(completed - previousCompletion_).count();
     }
     previousCompletion_ = completed;
-    hasPreviousCompletion_ = true;
     return report_;
 }
 

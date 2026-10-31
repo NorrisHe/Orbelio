@@ -1,11 +1,8 @@
 #pragma once
 #include "renderer_stats.hpp"
-#include "vma.hpp"
-#include <memory>
+#include "device_context.hpp"
 
 namespace orbelio {
-enum class GaussianRendererKind { Static, Fdu4d };
-
 class IGaussianRenderer {
 public:
     virtual ~IGaussianRenderer() = default;
@@ -16,11 +13,4 @@ public:
                         FrameReport& report) = 0;
 };
 
-class GaussianRendererFactory {
-public:
-    static GaussianRendererKind kind(const FrameState& frame);
-    static std::unique_ptr<IGaussianRenderer> create(GaussianRendererKind kind,
-                                                     DeviceContext context,
-                                                     VmaAllocator allocator);
-};
 }

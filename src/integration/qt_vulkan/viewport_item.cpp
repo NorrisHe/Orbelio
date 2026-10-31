@@ -46,7 +46,8 @@ private:
     }
 
     void prepare() {
-        if (failed_ && failedVersion_ == state_.sceneVersion && failedSettings_ == state_.renderSettings) {
+        if (deviceLost_ ||
+            (failed_ && failedVersion_ == state_.sceneVersion && failedSettings_ == state_.renderSettings)) {
             return;
         }
         failed_ = false;
@@ -66,12 +67,12 @@ private:
             }
             rendered_ = true;
         } catch (const std::exception& error) {
-            failFrame(error.what());
+            failFrame(error);
         }
         window_->endExternalCommands();
     }
 
-    void failFrame(const char* message) {
+    void failFrame(const std::exception& error) {
         failed_ = true;
         failedVersion_ = state_.sceneVersion;
         failedSettings_ = state_.renderSettings;
@@ -84,8 +85,21 @@ private:
         markDirty(QSGNode::DirtySubtreeBlocked);
         FrameReport report{};
         report.frame.sceneVersion = state_.sceneVersion;
-        publish(std::move(report), message);
-        qWarning() << "Viewport frame failed:" << message;
+        report.frame.viewportWidth = state_.width;
+        report.frame.viewportHeight = state_.height;
+        report.frame.failure = RenderFailure::Other;
+        if (const auto* vulkan = dynamic_cast<const VulkanError*>(&error)) {
+            if (vulkan->result() == VK_ERROR_DEVICE_LOST) {
+                deviceLost_ = true;
+                report.frame.failure = RenderFailure::DeviceLost;
+            } else if (vulkan->result() == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
+                       vulkan->result() == VK_ERROR_OUT_OF_HOST_MEMORY) {
+                report.frame.failure = RenderFailure::Capacity;
+            }
+        }
+        publish(std::move(report), error.what());
+        qWarning() << "Viewport frame failed:" << error.what() << "sceneVersion" << state_.sceneVersion
+                   << "size" << state_.width << state_.height;
     }
 
     void resizeTargetIfNeeded() {
@@ -120,7 +134,7 @@ private:
         try {
             publish(renderer_->finishFrame());
         } catch (const std::exception& error) {
-            failFrame(error.what());
+            failFrame(error);
         }
         rendered_ = false;
     }
@@ -132,6 +146,7 @@ private:
     std::unique_ptr<IVulkanRenderer> renderer_;
     std::unique_ptr<QSGTexture> texture_;
     bool rendered_ = false;
+    bool deviceLost_ = false;
     bool failed_ = false;
     std::uint64_t failedVersion_ = 0;
     RenderSettings failedSettings_;

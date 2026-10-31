@@ -24,9 +24,6 @@ class SequencePlayer final : public QObject {
     Q_PROPERTY(double endTime READ endTime NOTIFY changed)
     Q_PROPERTY(int frameIndex READ frameIndex NOTIFY changed)
     Q_PROPERTY(int frameCount READ frameCount NOTIFY changed)
-    Q_PROPERTY(qulonglong cacheBytes READ cacheBytes NOTIFY changed)
-    Q_PROPERTY(qulonglong cacheHits READ cacheHits NOTIFY changed)
-    Q_PROPERTY(qulonglong frameReads READ frameReads NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
     Q_PROPERTY(QVariantMap statistics READ statistics NOTIFY changed)
 public:

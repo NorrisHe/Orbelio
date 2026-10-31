@@ -6,6 +6,18 @@
 #include <thread>
 
 namespace orbelio {
+class VulkanError final : public std::runtime_error {
+public:
+    VulkanError(VkResult result, const char* operation)
+        : std::runtime_error(std::string(operation) + " failed: " + std::to_string(result)), result_(result) {
+    }
+
+    VkResult result() const { return result_; }
+
+private:
+    VkResult result_;
+};
+
 template <class T> T vkInfo(VkStructureType type) {
     T value{};
     value.sType = type;
@@ -14,7 +26,7 @@ template <class T> T vkInfo(VkStructureType type) {
 
 inline void vkCheck(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) {
-        throw std::runtime_error(std::string(operation) + " failed: " + std::to_string(result));
+        throw VulkanError(result, operation);
     }
 }
 

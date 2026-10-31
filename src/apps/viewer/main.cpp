@@ -176,7 +176,7 @@ int runViewer(QGuiApplication& app, const Options& options) {
     orbelio::SceneLoader loader(ioExecutor, completions, reader, cpuPool, options.limits);
     orbelio::ViewportState viewport;
     viewport.setRenderSettings(options.renderSettings);
-    orbelio::AppModel model(host.validationEnabled(), loader, viewport, cpuPool);
+    orbelio::AppModel model(loader, viewport, cpuPool);
     QObject::connect(&model, &orbelio::AppModel::renderSettingsChanged, &model, [&viewport] {
         QSettings stored("Orbelio", "Viewer");
         stored.setValue("render/maxGaussians", viewport.renderSettings().maxGaussians);
@@ -188,7 +188,11 @@ int runViewer(QGuiApplication& app, const Options& options) {
     QQuickView view;
     attachWindow(view, model, host);
     bridge = std::make_unique<orbelio::ViewportBridge>(
-        viewport, std::make_shared<orbelio::VulkanRendererFactory>(host.context(), options.limits.gpuBytes));
+        viewport,
+        std::make_shared<orbelio::VulkanRendererFactory>(
+            host.context(),
+            options.limits.gpuBytes,
+            (QCoreApplication::applicationDirPath() + "/shaders").toStdString()));
     cameraTools = std::make_unique<orbelio::CameraTools>(viewport, *bridge, ioExecutor, completions);
     QObject::connect(
         &model, &orbelio::AppModel::sceneChanged, cameraTools.get(), &orbelio::CameraTools::sceneChanged);

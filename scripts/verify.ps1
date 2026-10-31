@@ -14,7 +14,7 @@ try {
         & "$ValidationRoot\scripts\build.ps1" -Configuration $taskConfiguration -OrbelioRoot $taskRoot *>&1 | Tee-Object -FilePath $taskLog -Append
         & "$ValidationRoot\scripts\run.ps1" -Configuration $taskConfiguration -OrbelioRoot $taskRoot -Smoke *>&1 | Tee-Object -FilePath $taskLog -Append
         $taskValidationBuild = Join-Path $ValidationRoot "out\build\windows-$($taskConfiguration.ToLowerInvariant())"
-        ctest --test-dir $taskValidationBuild -R '^(ui\.sequence_layout|integration\.(camera|camera_tools|models|formats|sequence|fdu4d)_vulkan|formats.conformance|correctness\.(metrics|reference_vulkan))$' --output-on-failure --no-tests=error *>&1 | Tee-Object -FilePath $taskLog -Append
+        ctest --test-dir $taskValidationBuild --output-on-failure --no-tests=error *>&1 | Tee-Object -FilePath $taskLog -Append
         if ($LASTEXITCODE -ne 0) { throw 'Viewer integration tests failed' }
     }
 } catch {

@@ -11,6 +11,7 @@
 #include <vector>
 
 namespace orbelio {
+enum class RenderFailure { None, Capacity, DeviceLost, Other };
 
 struct FrameCapture {
     std::uint64_t requestId = 0;
@@ -68,6 +69,7 @@ struct FrameStats {
     std::uint32_t viewportWidth = 0;
     std::uint32_t viewportHeight = 0;
     std::uint64_t frameIndex = 0;
+    RenderFailure failure = RenderFailure::None;
 };
 
 } // namespace orbelio

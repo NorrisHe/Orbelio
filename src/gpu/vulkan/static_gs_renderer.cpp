@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <span>
@@ -46,6 +47,7 @@ constexpr std::size_t sortBitsMinimum = 1;
 constexpr std::size_t targetBytesPerPixel = 4;
 constexpr std::size_t shGroupSize = 32;
 constexpr std::size_t shVectorWidth = 4;
+constexpr std::size_t zeroBufferFloats = 1024;
 constexpr int timestampQueryCount = 2;
 constexpr auto telemetrySampleInterval = std::chrono::milliseconds(250);
 constexpr double fullTurnDegrees = 360.;
@@ -88,7 +90,10 @@ constexpr std::array<std::string_view, 3> radixSortShaders = {"upsweep_indirect"
                                                               "downsweep_indirect"};
 
 std::vector<std::uint32_t> readSpv(const char* path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    const std::string_view utf8(path);
+    const auto native =
+        std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+    std::ifstream file(native, std::ios::binary | std::ios::ate);
     if (!file) {
         throw std::runtime_error(std::string("Missing SPIR-V: ") + path);
     }
@@ -240,13 +245,6 @@ VmaAllocationCreateInfo hostVisibleAllocation() {
 } // namespace
 
 struct StaticGsRenderer::Impl {
-    // Frame values shared between the recording steps and the statistics fill.
-    struct CameraFrame {
-        // Upstream reads fields this adapter never assigns; it must stay zero-initialised.
-        VulkanGSRendererUniforms uniforms{};
-        double orbitDegrees = 0.;
-    };
-
     struct RasterScope {
         std::size_t references = 0;
         std::size_t waves = 0;
@@ -254,6 +252,7 @@ struct StaticGsRenderer::Impl {
     };
 
     DeviceContext context;
+    std::string shaderDirectory;
     VmaAllocator allocator;
     VulkanGSRenderer renderer;
     VulkanGSPipelineBuffers buffers;
@@ -306,7 +305,8 @@ struct StaticGsRenderer::Impl {
     double sortingMs = 0;
     double rasterMs = 0;
 
-    Impl(DeviceContext c, VmaAllocator a) : context(c), allocator(a) {}
+    Impl(DeviceContext c, VmaAllocator a, std::string directory)
+        : context(c), shaderDirectory(std::move(directory)), allocator(a) {}
 
     void initialize() {
         loadShaders();
@@ -368,7 +368,8 @@ struct StaticGsRenderer::Impl {
     }
 
     void loadShaders() {
-        const auto directory = std::string(LFS_VULKAN_RASTERIZER_DEV_SPV_DIR);
+        const auto directory =
+            shaderDirectory.empty() ? std::string(LFS_VULKAN_RASTERIZER_DEV_SPV_DIR) : shaderDirectory + "/";
         std::map<std::string, std::string> paths;
         for (const auto name : rasterizerShaders) {
             paths[std::string(name)] = directory + "generated/" + std::string(name) + ".spv";
@@ -383,6 +384,10 @@ struct StaticGsRenderer::Impl {
                                     context.queue,
                                     context.queueFamily,
                                     allocator);
+    }
+
+    std::string shaderPath(std::string_view filename, const char* developmentPath) const {
+        return shaderDirectory.empty() ? developmentPath : shaderDirectory + "/" + std::string(filename);
     }
 
     void configureBackend() {
@@ -475,7 +480,8 @@ struct StaticGsRenderer::Impl {
             createPipelineLayout(context.device,
                                  statsDescriptors,
                                  VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, statisticsPushBytes});
-        statsPipeline = createComputePipeline(context.device, statsLayout, ORBELIO_STATS_SPV);
+        const auto path = shaderPath("tile_stats.spv", ORBELIO_STATS_SPV);
+        statsPipeline = createComputePipeline(context.device, statsLayout, path.c_str());
     }
 
     // Host-side statistics helper: reduces per-tile reference counts into one max + total.
@@ -526,25 +532,8 @@ struct StaticGsRenderer::Impl {
         layout = createPipelineLayout(context.device,
                                       descriptors,
                                       VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, composePushBytes});
-        compose = createComputePipeline(context.device, layout, ORBELIO_COMPOSE_SPV);
-    }
-
-    void upload(Buffer<float>& destination, const std::vector<float>& source) {
-        auto& target = renderer.resizeDeviceBuffer(destination, source.size());
-        const lfs::rendering::vulkan::DeclaredAccess access{&target,
-                                                            lfs::rendering::vulkan::BufferUse::TransferWrite};
-        renderer.planTransfer(std::span{&access, 1});
-        const std::size_t bytes = source.size() * sizeof(float);
-        // vkCmdUpdateBuffer snapshots CPU bytes into reusable command buffers;
-        // no per-frame staging allocation.
-        for (std::size_t offset = 0; offset < bytes; offset += commandUpdateChunkBytes) {
-            const auto chunk = std::min<std::size_t>(commandUpdateChunkBytes, bytes - offset);
-            vkCmdUpdateBuffer(renderer.activeCommandBuffer(),
-                              target.buffer,
-                              target.offset + offset,
-                              chunk,
-                              reinterpret_cast<const std::byte*>(source.data()) + offset);
-        }
+        const auto path = shaderPath("compose.spv", ORBELIO_COMPOSE_SPV);
+        compose = createComputePipeline(context.device, layout, path.c_str());
     }
 
     auto& transferTarget(Buffer<float>& destination, std::size_t floats) {
@@ -553,6 +542,11 @@ struct StaticGsRenderer::Impl {
                                                             lfs::rendering::vulkan::BufferUse::TransferWrite};
         renderer.planTransfer(std::span{&access, 1});
         return target;
+    }
+
+    void clearBuffer(Buffer<float>& destination, std::size_t floats) {
+        const auto& target = transferTarget(destination, floats);
+        vkCmdFillBuffer(renderer.activeCommandBuffer(), target.buffer, target.offset, target.size, 0);
     }
 
     void uploadAttributes(Buffer<float>& destination,
@@ -584,7 +578,7 @@ struct StaticGsRenderer::Impl {
     void uploadSphericalHarmonics(const StaticScene& next, std::size_t end) {
         const auto components = next.shRestCoefficients() * 3;
         if (!components) {
-            upload(buffers.shN, std::vector<float>(shVectorWidth, 0.f));
+            clearBuffer(buffers.shN, shVectorWidth);
             return;
         }
         const auto slots = (components + shVectorWidth - 1) / shVectorWidth;
@@ -637,11 +631,9 @@ struct StaticGsRenderer::Impl {
         uploadAttributes(buffers.scaling_raw, scene->logScales, 3, end);
         uploadAttributes(buffers.opacity_raw, scene->opacityLogits, 1, end);
         uploadAttributes(buffers.sh0, scene->sh0, 3, end);
-        // Overlays and unused projection slots share one zero fill.
         if (!uploadedGaussians) {
-            const std::vector<float> zeros(1024, 0);
-            upload(dummy, zeros);
-            upload(overlays, zeros);
+            clearBuffer(dummy, zeroBufferFloats);
+            clearBuffer(overlays, zeroBufferFloats);
         }
         uploadSphericalHarmonics(*scene, end);
         renderer.endCommandBatch(true);
@@ -704,9 +696,9 @@ struct StaticGsRenderer::Impl {
         rasterMs = 0;
     }
 
-    CameraFrame buildCameraFrame(const FrameState& f) const {
-        CameraFrame frame{};
-        auto& u = frame.uniforms;
+    VulkanGSRendererUniforms buildCameraUniforms(const FrameState& f) const {
+        // Upstream reads fields this adapter never assigns; it must stay zero-initialised.
+        VulkanGSRendererUniforms u{};
         u.image_width = f.width;
         u.camera_width = f.width;
         u.image_height = f.height;
@@ -728,12 +720,11 @@ struct StaticGsRenderer::Impl {
         u.cx = static_cast<float>(f.width) * .5f;
         u.cy = static_cast<float>(f.height) * .5f;
 
-        frame.orbitDegrees = std::fmod(f.camera.yawDegrees + fullTurnDegrees, fullTurnDegrees);
         // Upstream shader expects column-major world->camera (camera Z forward, Y down).
         for (std::size_t index = 0; index < view.worldToCamera.size(); ++index) {
             u.world_view_transform[index] = view.worldToCamera[index];
         }
-        return frame;
+        return u;
     }
 
     // Projection, depth sort and the exact tile-instance gate. Returns the gate's raw instance count.
@@ -748,7 +739,8 @@ struct StaticGsRenderer::Impl {
             context.device,
             attributeDescriptors,
             VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AttributeParameters)});
-        attributePipeline = createComputePipeline(context.device, attributeLayout, ORBELIO_ATTRIBUTES_SPV);
+        const auto path = shaderPath("attributes.spv", ORBELIO_ATTRIBUTES_SPV);
+        attributePipeline = createComputePipeline(context.device, attributeLayout, path.c_str());
     }
 
     void bindAttributeBuffers() {
@@ -1016,7 +1008,7 @@ struct StaticGsRenderer::Impl {
         lastCensusAllocations = renderer.getBufferAllocationCount();
     }
 
-    void fillReport(FrameReport& report, const CameraFrame& camera, const RasterScope& scope) {
+    void fillReport(FrameReport& report, const CameraState& camera, const RasterScope& scope) {
         auto& frame = report.frame;
         auto& backend = report.backend;
         backend.telemetryBytes =
@@ -1031,7 +1023,7 @@ struct StaticGsRenderer::Impl {
         frame.pixelReadbacks = pixelReadbacks;
         backend.gsReservedBytes =
             buffers.getTotalOwnedAllocSize() + dummy.deviceBuffer.allocSize + overlays.deviceBuffer.allocSize;
-        frame.orbitDegrees = camera.orbitDegrees;
+        frame.orbitDegrees = std::fmod(camera.yawDegrees + fullTurnDegrees, fullTurnDegrees);
         frame.capture = capture;
         frame.gpuRenderMs = measured(gpuMs);
         frame.projectionGpuMs = measured(projectionMs);
@@ -1053,10 +1045,10 @@ struct StaticGsRenderer::Impl {
         ensureScene(f);
         resetStageTimers();
 
-        const auto camera = buildCameraFrame(f);
+        const auto uniforms = buildCameraUniforms(f);
         const bool captureRequested = f.captureRequestId && uploadedGaussians == targetGaussians &&
                                       (!capture || capture->requestId != f.captureRequestId);
-        const auto scope = recordGaussianPass(camera.uniforms, f.renderSettings);
+        const auto scope = recordGaussianPass(uniforms, f.renderSettings);
 
         // Recorded after the gate's batch-A submit/wait, which starts a fresh command buffer.
         const auto command = renderer.activeCommandBuffer();
@@ -1079,11 +1071,12 @@ struct StaticGsRenderer::Impl {
         }
         readComposeTimestamp(report);
         refreshBufferCensus(report);
-        fillReport(report, camera, scope);
+        fillReport(report, f.camera, scope);
     }
 };
 
-StaticGsRenderer::StaticGsRenderer(DeviceContext c, VmaAllocator a) : impl_(std::make_unique<Impl>(c, a)) {
+StaticGsRenderer::StaticGsRenderer(DeviceContext c, VmaAllocator a, std::string shaderDirectory)
+    : impl_(std::make_unique<Impl>(c, a, std::move(shaderDirectory))) {
     impl_->initialize();
 }
 

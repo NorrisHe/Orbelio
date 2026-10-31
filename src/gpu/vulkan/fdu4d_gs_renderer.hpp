@@ -4,7 +4,8 @@
 namespace orbelio {
 class Fdu4dGsRenderer final : public IGaussianRenderer {
 public:
-    Fdu4dGsRenderer(DeviceContext context, VmaAllocator allocator) : rasterizer_(context, allocator) {}
+    Fdu4dGsRenderer(DeviceContext context, VmaAllocator allocator, std::string shaderDirectory = {})
+        : rasterizer_(context, allocator, std::move(shaderDirectory)) {}
 
     void render(const FrameState& frame,
                 VkImage image,
@@ -17,6 +18,5 @@ private:
     std::shared_ptr<const Fdu4dScene> source_;
     std::shared_ptr<const StaticScene> evaluated_;
     double time_ = 0;
-    std::size_t count_ = 0;
 };
 }

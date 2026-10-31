@@ -9,7 +9,7 @@ namespace orbelio {
 // Temporary GPL backend adapter. Replacement boundary: no LFS types leave this header.
 class StaticGsRenderer final : public IGaussianRenderer {
 public:
-    StaticGsRenderer(DeviceContext context, VmaAllocator allocator);
+    StaticGsRenderer(DeviceContext context, VmaAllocator allocator, std::string shaderDirectory = {});
     ~StaticGsRenderer() override;
     void render(const FrameState& frame,
                 VkImage image,

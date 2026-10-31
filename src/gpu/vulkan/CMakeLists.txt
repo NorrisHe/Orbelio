@@ -4,7 +4,7 @@ target_link_libraries(orbelio_vulkan_api INTERFACE orbelio_core volk::volk Vulka
 target_compile_definitions(orbelio_vulkan_api INTERFACE VK_NO_PROTOTYPES)
 
 add_library(orbelio_vulkan STATIC renderer.cpp bootstrap_renderer.cpp static_gs_renderer.cpp
-    gaussian_renderer.cpp fdu4d_gs_renderer.cpp vma.cpp)
+    fdu4d_gs_renderer.cpp vma.cpp)
 # VMA stays private: only this library's sources allocate, so vk_mem_alloc.h never reaches consumers.
 target_link_libraries(orbelio_vulkan PRIVATE lfs_vulkan_rasterizer GPUOpen::VulkanMemoryAllocator)
 target_compile_definitions(orbelio_vulkan PRIVATE VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)

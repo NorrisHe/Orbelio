@@ -12,7 +12,9 @@ namespace orbelio {
 // Owns the native target, pooled resources and the selected Gaussian backend.
 class BootstrapRenderer final : public IVulkanRenderer {
 public:
-    explicit BootstrapRenderer(DeviceContext context, std::size_t gpuBudgetBytes = ModelLimits{}.gpuBytes);
+    explicit BootstrapRenderer(DeviceContext context,
+                               std::size_t gpuBudgetBytes = ModelLimits{}.gpuBytes,
+                               std::string shaderDirectory = {});
     ~BootstrapRenderer() override;
     BootstrapRenderer(const BootstrapRenderer&) = delete;
     BootstrapRenderer& operator=(const BootstrapRenderer&) = delete;
@@ -52,9 +54,10 @@ private:
     RenderThreadGuard guard_;
     DeviceContext context_;
     std::size_t gpuBudgetBytes_;
+    std::string shaderDirectory_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     std::unique_ptr<IGaussianRenderer> gs_;
-    GaussianRendererKind gsKind_ = GaussianRendererKind::Static;
+    bool gsUsesFdu4d_ = false;
 
     VkImage image_ = VK_NULL_HANDLE;
     VkImageView imageView_ = VK_NULL_HANDLE;
@@ -77,6 +80,5 @@ private:
     FrameReport report_;
     std::chrono::steady_clock::time_point frameStart_;
     std::chrono::steady_clock::time_point previousCompletion_;
-    bool hasPreviousCompletion_ = false;
 };
 } // namespace orbelio

@@ -28,11 +28,13 @@ public:
 class VulkanRendererFactory final : public IVulkanRendererFactory {
 public:
     explicit VulkanRendererFactory(DeviceContext context,
-                                   std::size_t gpuBudgetBytes = ModelLimits{}.gpuBytes);
+                                   std::size_t gpuBudgetBytes = ModelLimits{}.gpuBytes,
+                                   std::string shaderDirectory = {});
     std::unique_ptr<IVulkanRenderer> create() const override;
 
 private:
     DeviceContext context_;
     std::size_t gpuBudgetBytes_;
+    std::string shaderDirectory_;
 };
 }

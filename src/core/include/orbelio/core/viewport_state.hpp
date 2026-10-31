@@ -69,8 +69,6 @@ public:
 
     unsigned shDegree() const { return spatial() ? spatial()->shDegree : 0; }
 
-    std::string sceneFormat() const { return spatial() ? spatial()->format : std::string{}; }
-
     bool hasScene() const { return scene_ || fdu4d_; }
 
     std::uint64_t sceneVersion() const { return sceneVersion_; }
