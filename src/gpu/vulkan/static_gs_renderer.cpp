@@ -31,6 +31,17 @@ constexpr std::uint32_t statisticsWorkgroupSize = 256;
 constexpr std::uint32_t composeWorkgroupSize = 8;
 constexpr std::uint32_t statisticsPushBytes = 4;
 constexpr std::uint32_t composePushBytes = 8;
+constexpr std::uint32_t attributeWorkgroupSize = 256;
+
+struct AttributeParameters {
+    std::uint32_t count = 0;
+    std::uint32_t mode = 0;
+    float minimum = 0;
+    float maximum = 1;
+    std::array<float, 4> viewZ{};
+};
+
+static_assert(sizeof(AttributeParameters) == 32);
 constexpr std::size_t sortBitsMinimum = 1;
 constexpr std::size_t targetBytesPerPixel = 4;
 constexpr std::size_t shGroupSize = 32;
@@ -275,6 +286,9 @@ struct StaticGsRenderer::Impl {
     VkDescriptorSetLayout descriptors = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkPipeline compose = VK_NULL_HANDLE;
+    VkDescriptorSetLayout attributeDescriptors = VK_NULL_HANDLE;
+    VkPipelineLayout attributeLayout = VK_NULL_HANDLE;
+    VkPipeline attributePipeline = VK_NULL_HANDLE;
 
     VkBuffer readback = VK_NULL_HANDLE;
     VmaAllocation readbackAllocation = VK_NULL_HANDLE;
@@ -336,6 +350,15 @@ struct StaticGsRenderer::Impl {
         }
         if (descriptors) {
             vkDestroyDescriptorSetLayout(context.device, descriptors, nullptr);
+        }
+        if (attributePipeline) {
+            vkDestroyPipeline(context.device, attributePipeline, nullptr);
+        }
+        if (attributeLayout) {
+            vkDestroyPipelineLayout(context.device, attributeLayout, nullptr);
+        }
+        if (attributeDescriptors) {
+            vkDestroyDescriptorSetLayout(context.device, attributeDescriptors, nullptr);
         }
     }
 
@@ -714,7 +737,72 @@ struct StaticGsRenderer::Impl {
     }
 
     // Projection, depth sort and the exact tile-instance gate. Returns the gate's raw instance count.
-    std::size_t recordProjection(const VulkanGSRendererUniforms& u) {
+    void createAttributePipeline() {
+        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+        for (std::uint32_t index = 0; index < bindings.size(); ++index) {
+            bindings[index] = {
+                index, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        }
+        attributeDescriptors = createPushDescriptorLayout(context.device, bindings);
+        attributeLayout = createPipelineLayout(
+            context.device,
+            attributeDescriptors,
+            VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AttributeParameters)});
+        attributePipeline = createComputePipeline(context.device, attributeLayout, ORBELIO_ATTRIBUTES_SPV);
+    }
+
+    void bindAttributeBuffers() {
+        using namespace lfs::rendering::vulkan;
+        const std::array<const _VulkanBuffer*, 4> sources{&buffers.xyz_ws.deviceBuffer,
+                                                          &buffers.opacity_raw.deviceBuffer,
+                                                          &buffers.scaling_raw.deviceBuffer,
+                                                          &buffers.rgb.deviceBuffer};
+        const DeclaredAccess access[] = {{sources[0], BufferUse::ComputeRead},
+                                         {sources[1], BufferUse::ComputeRead},
+                                         {sources[2], BufferUse::ComputeRead},
+                                         {sources[3], BufferUse::ComputeWrite}};
+        renderer.planTransfer(access);
+        std::array<VkDescriptorBufferInfo, sources.size()> infos{};
+        std::array<VkWriteDescriptorSet, sources.size()> writes{};
+        for (std::size_t index = 0; index < sources.size(); ++index) {
+            infos[index] = {sources[index]->buffer, sources[index]->offset, sources[index]->size};
+            writes[index] = storageBufferWrite(static_cast<std::uint32_t>(index), infos[index]);
+        }
+        const auto command = renderer.activeCommandBuffer();
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, attributePipeline);
+        vkCmdPushDescriptorSetKHR(command,
+                                  VK_PIPELINE_BIND_POINT_COMPUTE,
+                                  attributeLayout,
+                                  0,
+                                  static_cast<std::uint32_t>(writes.size()),
+                                  writes.data());
+    }
+
+    void colorAttributes(const VulkanGSRendererUniforms& u, const RenderSettings& settings) {
+        if (settings.attributeView == AttributeView::Normal) {
+            return;
+        }
+        if (!attributePipeline) {
+            createAttributePipeline();
+        }
+        AttributeParameters parameters{};
+        parameters.count = static_cast<std::uint32_t>(uploadedGaussians);
+        parameters.mode = static_cast<std::uint32_t>(settings.attributeView);
+        const bool scale = settings.attributeView == AttributeView::Scale;
+        parameters.minimum = scale ? std::log(settings.attributeMinimum) : settings.attributeMinimum;
+        parameters.maximum = scale ? std::log(settings.attributeMaximum) : settings.attributeMaximum;
+        for (std::size_t index = 0; index < parameters.viewZ.size(); ++index) {
+            parameters.viewZ[index] = u.world_view_transform[index * 4 + 2];
+        }
+        bindAttributeBuffers();
+        const auto command = renderer.activeCommandBuffer();
+        vkCmdPushConstants(
+            command, attributeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(parameters), &parameters);
+        vkCmdDispatch(
+            command, (parameters.count + attributeWorkgroupSize - 1) / attributeWorkgroupSize, 1, 1);
+    }
+
+    std::size_t recordProjection(const VulkanGSRendererUniforms& u, const RenderSettings& settings) {
         renderer.beginCommandBatch();
         currentTiles = u.grid_width * u.grid_height;
         if (sampleCounters) {
@@ -738,6 +826,7 @@ struct StaticGsRenderer::Impl {
                                           /*lod_weights=*/{},
                                           /*lod_counts=*/{},
                                           /*write_overlay_flags=*/false);
+        colorAttributes(u, settings);
         renderer.executeSortPrimitivesByDepth(u, buffers);
         renderer.executeApplyDepthOrdering(u, buffers);
         renderer.executeCalculateIndexBufferOffset(u, buffers);
@@ -777,8 +866,8 @@ struct StaticGsRenderer::Impl {
         return waves;
     }
 
-    RasterScope recordGaussianPass(const VulkanGSRendererUniforms& u) {
-        const std::size_t references = recordProjection(u);
+    RasterScope recordGaussianPass(const VulkanGSRendererUniforms& u, const RenderSettings& settings) {
+        const std::size_t references = recordProjection(u, settings);
         const std::size_t waves = recordWaveRasterization(u, references);
         return {references, waves, currentTiles};
     }
@@ -967,7 +1056,7 @@ struct StaticGsRenderer::Impl {
         const auto camera = buildCameraFrame(f);
         const bool captureRequested = f.captureRequestId && uploadedGaussians == targetGaussians &&
                                       (!capture || capture->requestId != f.captureRequestId);
-        const auto scope = recordGaussianPass(camera.uniforms);
+        const auto scope = recordGaussianPass(camera.uniforms, f.renderSettings);
 
         // Recorded after the gate's batch-A submit/wait, which starts a fresh command buffer.
         const auto command = renderer.activeCommandBuffer();

@@ -48,6 +48,7 @@ public:
     std::vector<std::byte> bytes;
     std::string requestedAsset;
     bool readShouldFail = false;
+    std::function<void()> onRead;
 
     MemoryReader() {
         std::ifstream file(ORBELIO_TEST_MODEL, std::ios::binary | std::ios::ate);
@@ -62,6 +63,9 @@ public:
                                   orbelio::BytePool& pool,
                                   std::size_t limitBytes) override {
         requestedAsset = asset;
+        if (onRead) {
+            onRead();
+        }
         if (readShouldFail) {
             throw std::runtime_error("Injected read failure");
         }
@@ -118,6 +122,37 @@ void readAndDecodeFailuresUseCompletionExecutor() {
     completions.runOne();
     require(!result->scene && !result->error.empty(), "Invalid PLY was accepted");
     require(pool.stats().activeBytes == 0, "Failure leaked a pool lease");
+}
+
+void loadingStagesHaveSeparateClocks() {
+    using namespace std::chrono_literals;
+    orbelio::SceneLoader::Clock::time_point time{};
+    MemoryReader reader;
+    reader.onRead = [&] { time += 7ms; };
+    orbelio::BytePool pool(orbelio::SceneLoader::modelByteBudget);
+    ManualExecutor worker;
+    ManualExecutor completions;
+    orbelio::SceneLoader loader(worker, completions, reader, pool, {}, [&] { return time; });
+    std::optional<orbelio::SceneLoadResult> result;
+    const auto load = [&] {
+        require(loader.load("memory:timed", [&](auto loaded) { result = std::move(loaded); }),
+                "Timed load rejected");
+        time += 3ms;
+        worker.runOne();
+        time += 5ms;
+        completions.runOne();
+    };
+    load();
+    const auto& measured = result->timings;
+    require(result->scene && measured.workerQueueMs == 3. && measured.readMs == 7. &&
+                measured.decodeMs == 0. && measured.completionQueueMs == 5. && measured.totalMs == 15.,
+            "Loading stages mixed worker, read, decode or completion-queue time");
+    result.reset();
+    reader.readShouldFail = true;
+    load();
+    require(!result->scene && result->timings.readMs == 7. && !result->timings.decodeMs &&
+                result->timings.totalMs == 15.,
+            "Failed read lost its duration or fabricated an unstarted decode sample");
 }
 
 void rejectedWorkDoesNotRead() {
@@ -199,6 +234,7 @@ int main() {
     try {
         deferredLoadSurvivesLoaderDestruction();
         readAndDecodeFailuresUseCompletionExecutor();
+        loadingStagesHaveSeparateClocks();
         rejectedWorkDoesNotRead();
         queuedResultsShareTheResidentBudget();
         viewportsHaveIndependentSnapshots();

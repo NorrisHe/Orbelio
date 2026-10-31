@@ -20,6 +20,7 @@ function(orbelio_compute_shader name definition)
 endfunction()
 orbelio_compute_shader(compose ORBELIO_COMPOSE_SPV)
 orbelio_compute_shader(tile_stats ORBELIO_STATS_SPV)
+orbelio_compute_shader(attributes ORBELIO_ATTRIBUTES_SPV)
 
 target_link_libraries(orbelio_vulkan PUBLIC orbelio_vulkan_api)
 if(ORBELIO_ENABLE_TRACY)

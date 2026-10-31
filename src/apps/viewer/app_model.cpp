@@ -2,6 +2,8 @@
 #include <QPointer>
 #include <QFileInfo>
 #include <chrono>
+#include <cmath>
+#include <limits>
 
 namespace orbelio {
 namespace {
@@ -18,6 +20,7 @@ AppModel::AppModel(bool validation, SceneLoader& sceneLoader, ViewportState& vie
       sequencePlayer_(sceneLoader, viewport, this) {
     connect(&sequencePlayer_, &SequencePlayer::frameRequested, this, &AppModel::frameRequested);
     connect(&sequencePlayer_, &SequencePlayer::frameRequested, this, &AppModel::changed);
+    connect(this, &AppModel::changed, this, &AppModel::inspectorChanged);
 }
 
 QString AppModel::budgetDescription() const {
@@ -26,6 +29,89 @@ QString AppModel::budgetDescription() const {
            ". Decode/workspace: " + mebibytes(limits.decodedBytes) +
            "/model. CPU scenes + queued results: " + mebibytes(limits.residentBytes) +
            ". GPU allocations/blocks: " + mebibytes(limits.gpuBytes) + ". Qt and driver excluded.";
+}
+
+QVariantMap AppModel::inspector() const {
+    const auto content = previousScene_ ? previousScene_->content : sequencePlayer_.confirmedContent();
+    const auto* spatial = content.fdu4d ? &content.fdu4d->spatial : content.scene.get();
+    if (!spatial) {
+        return {};
+    }
+    const auto path = previousScene_ ? previousScene_->path : modelPath_;
+    QVariantMap result{{"name", QFileInfo(path).fileName()},
+                       {"path", path},
+                       {"format", QString::fromStdString(spatial->format)},
+                       {"gaussians", qulonglong(spatial->count())},
+                       {"shDegree", spatial->shDegree},
+                       {"representation", content.fdu4d ? "FDU 4DGS" : "Static 3DGS"},
+                       {"hasStableIds", false},
+                       {"boundsUnavailableReason",
+                        content.fdu4d ? "Dynamic bounds have not been measured" : "No decoded bounds"}};
+    if (!content.fdu4d && spatial->centerBounds) {
+        const auto& bounds = *spatial->centerBounds;
+        result["boundsMinimum"] = QVariantList{bounds.minimum[0], bounds.minimum[1], bounds.minimum[2]};
+        result["boundsMaximum"] = QVariantList{bounds.maximum[0], bounds.maximum[1], bounds.maximum[2]};
+    }
+    if (!previousScene_ && sequencePlayer_.active()) {
+        result["representation"] = content.fdu4d ? "FDU 4DGS" : "PLY Sequence";
+        result["framePath"] = sequencePlayer_.frameAsset();
+        result["frameIndex"] = sequencePlayer_.frameIndex();
+        result["frameTime"] = sequencePlayer_.frameTime();
+    }
+    return result;
+}
+
+void AppModel::setAttributeView(int value) {
+    if (value < int(AttributeView::Normal) || value > int(AttributeView::Scale)) {
+        return;
+    }
+    auto settings = viewport_.renderSettings();
+    settings.attributeView = AttributeView(value);
+    const auto& range = attributeRanges_[std::size_t(value)];
+    settings.attributeMinimum = range.first;
+    settings.attributeMaximum = range.second;
+    setRenderSettings(settings);
+}
+
+bool AppModel::setAttributeRange(double minimum, double maximum) {
+    auto settings = viewport_.renderSettings();
+    if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum >= maximum ||
+        std::abs(minimum) > std::numeric_limits<float>::max() ||
+        std::abs(maximum) > std::numeric_limits<float>::max() ||
+        settings.attributeView == AttributeView::Normal || settings.attributeView == AttributeView::Opacity ||
+        (settings.attributeView == AttributeView::Scale && minimum <= 0)) {
+        return false;
+    }
+    settings.attributeMinimum = float(minimum);
+    settings.attributeMaximum = float(maximum);
+    if (settings.attributeMinimum >= settings.attributeMaximum ||
+        (settings.attributeView == AttributeView::Scale &&
+         (settings.attributeMinimum <= 0 ||
+          std::log(settings.attributeMinimum) >= std::log(settings.attributeMaximum)))) {
+        return false;
+    }
+    attributeRanges_[std::size_t(settings.attributeView)] = {settings.attributeMinimum,
+                                                             settings.attributeMaximum};
+    setRenderSettings(settings);
+    return true;
+}
+
+void AppModel::resetAttributeRanges() {
+    const auto content = viewport_.content();
+    const auto* spatial = content.fdu4d ? &content.fdu4d->spatial : content.scene.get();
+    attributeRanges_ = {{{0, 1}, {0, 10}, {0, 1}, {.001f, 1}}};
+    if (spatial) {
+        attributeRanges_[1] = {0, std::max(1.f, viewport_.camera().distance + spatial->radius * 2)};
+        if (spatial->logScaleRange) {
+            const auto& range = *spatial->logScaleRange;
+            attributeRanges_[3] = {std::exp(range[0]) * .5f, std::exp(range[1]) * 2};
+        }
+    }
+    const auto range = attributeRanges_[std::size_t(attributeView())];
+    auto settings = viewport_.renderSettings();
+    settings.attributeMinimum = range.first;
+    settings.attributeMaximum = range.second;
+    viewport_.setRenderSettings(settings);
 }
 
 void AppModel::restoreLastScene() {
@@ -213,12 +299,15 @@ bool AppModel::finishSceneUpload(const FrameStats& frame) {
     uploadPendingVersion_.reset();
     previousScene_.reset();
     loadState_ = LoadState::Ready;
+    resetAttributeRanges();
     ioStatus_ = QString("Loaded %1 Gaussians").arg(frame.gaussianCount);
     if (viewport_.content().fdu4d) {
         sequencePlayer_.activateFdu4d(viewport_.content().fdu4d);
     } else {
         sequencePlayer_.activate(std::move(pendingSequence_), viewport_.content().scene);
     }
+    Q_EMIT renderSettingsChanged();
+    Q_EMIT frameRequested();
     return true;
 }
 
@@ -339,6 +428,9 @@ void AppModel::acceptFrame(const FrameReport& report, const QString& error) {
         return;
     }
     const bool sceneBecameReady = finishSceneUpload(frame);
+    if (sequenceFrame == SequencePlayer::FrameAcceptance::Committed) {
+        Q_EMIT inspectorChanged();
+    }
     if (generation != requestGeneration_) {
         return;
     }

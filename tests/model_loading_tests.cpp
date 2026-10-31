@@ -234,6 +234,39 @@ void closingDropsLateCompletions() {
     require(!fixture.viewport.hasScene() && fixture.pool.stats().activeBytes == 0,
             "Late completion accessed a destroyed model or retained a read lease");
 }
+
+void inspectorTracksCommittedAssetsAndRangeSettings() {
+    Fixture fixture;
+    require(fixture.model->inspector().isEmpty(), "Empty viewer fabricated model metadata");
+    fixture.loadReady(guitarPath);
+    const auto first = fixture.model->inspector();
+    require(first["gaussians"].toULongLong() == guitarCount && first.contains("boundsMinimum") &&
+                first.contains("boundsMaximum") && !first["hasStableIds"].toBool(),
+            "Inspector omitted measured bounds or advertised invented IDs");
+    fixture.model->setAttributeView(int(orbelio::AttributeView::Scale));
+    require(!fixture.model->setAttributeRange(0, 1) && !fixture.model->setAttributeRange(2, 1) &&
+                fixture.model->setAttributeRange(.01, .1),
+            "Invalid scale range was accepted or valid range rejected");
+    require(!fixture.model->setAttributeRange(10, 10.000001) &&
+                std::abs(fixture.model->attributeMinimum() - .01) < 1e-6 &&
+                std::abs(fixture.model->attributeMaximum() - .1) < 1e-6,
+            "Collapsed GPU log-scale range was accepted or changed the previous range");
+    const auto camera = fixture.viewport.camera();
+    fixture.model->setAttributeView(int(orbelio::AttributeView::Normal));
+    fixture.model->setAttributeView(int(orbelio::AttributeView::Scale));
+    require(std::abs(fixture.model->attributeMinimum() - .01) < 1e-6 &&
+                fixture.viewport.camera().yawDegrees == camera.yawDegrees,
+            "Mode switch lost its range or changed the camera");
+    fixture.model->loadModel(bikerPath);
+    fixture.completeRead();
+    require(fixture.model->inspector() == first, "Candidate metadata replaced the last confirmed asset");
+    fixture.completeFrame();
+    require(fixture.model->inspector()["gaussians"].toULongLong() == bikerCount &&
+                fixture.model->inspector()["path"].toString() == bikerPath,
+            "New model metadata did not commit atomically");
+    fixture.model->unloadModel();
+    require(fixture.model->inspector().isEmpty(), "Unloaded Inspector retained the old model");
+}
 }
 
 int main(int argc, char** argv) {
@@ -246,6 +279,7 @@ int main(int argc, char** argv) {
         admissionAndBudgetsFailWithoutPoisoningTheSession();
         failedUploadRestoresThePreviousSceneAndCamera();
         closingDropsLateCompletions();
+        inspectorTracksCommittedAssetsAndRangeSettings();
         std::cout << "Model loading, coalescing, stale frames, budgets, recovery and shutdown: PASS\n";
         return 0;
     } catch (const std::exception& error) {

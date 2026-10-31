@@ -100,12 +100,15 @@ void fitRobustBounds(StaticScene& scene, std::size_t count) {
     // Robust framing excludes position outliers only from camera fitting; all Gaussians are rendered.
     FramingBounds outer{};
     FramingBounds central{};
+    CenterBounds exact{};
     std::vector<float> axis(count);
     for (int component = 0; component < 3; ++component) {
         for (std::size_t splat = 0; splat < count; ++splat) {
             axis[splat] = scene.positions[3 * splat + component];
         }
         std::sort(axis.begin(), axis.end());
+        exact.minimum[component] = axis.front();
+        exact.maximum[component] = axis.back();
         outer.setAxis(component, axis[count / outlierTrim], axis[count - 1 - count / outlierTrim]);
         central.setAxis(
             component, axis[count / centralFramingTrim], axis[count - 1 - count / centralFramingTrim]);
@@ -115,12 +118,29 @@ void fitRobustBounds(StaticScene& scene, std::size_t count) {
         outer.radius() > backgroundExtentRatio * central.radius() ? fitDetailBounds(scene, axis) : outer;
     scene.center = framing.center;
     scene.radius = framing.radius();
+    scene.centerBounds = exact;
+}
+
+void measureScaleRange(StaticScene& scene) {
+    const auto maximumAxis = [&](std::size_t index) {
+        return std::max(
+            {scene.logScales[index * 3], scene.logScales[index * 3 + 1], scene.logScales[index * 3 + 2]});
+    };
+    auto minimum = maximumAxis(0);
+    auto maximum = minimum;
+    for (std::size_t index = 1; index < scene.count(); ++index) {
+        const auto value = maximumAxis(index);
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+    }
+    scene.logScaleRange = std::array{minimum, maximum};
 }
 } // namespace
 
 void detail::finishDecodedScene(StaticScene& scene) {
     validateDecodedScene(scene);
     fitRobustBounds(scene, scene.count());
+    measureScaleRange(scene);
     const auto bytes = scene.count() * (baseFloatCount + scene.shRestCoefficients() * 3) * sizeof(float);
     scene.memory.shrinkTo(bytes);
 }

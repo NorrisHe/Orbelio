@@ -143,6 +143,20 @@ void checkBackgroundDoesNotOwnFraming(const std::vector<std::byte>& bytes) {
             "Distant background or one degenerate Gaussian displaced the subject framing");
     require(std::equal(subject.positions.begin(), subject.positions.end(), environment.positions.begin()),
             "Framing changed decoded subject positions");
+    require(subject.centerBounds && environment.centerBounds &&
+                environment.centerBounds->maximum[0] > subject.centerBounds->maximum[0],
+            "Inspector bounds reused the outlier-trimmed camera framing");
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        auto minimum = environment.positions[axis];
+        auto maximum = minimum;
+        for (std::size_t index = 0; index < environment.count(); ++index) {
+            minimum = std::min(minimum, environment.positions[index * 3 + axis]);
+            maximum = std::max(maximum, environment.positions[index * 3 + axis]);
+        }
+        require(environment.centerBounds->minimum[axis] == minimum &&
+                    environment.centerBounds->maximum[axis] == maximum,
+                "Inspector AABB omitted a decoded Gaussian center");
+    }
 }
 
 std::vector<std::byte> readSampleAsset() {

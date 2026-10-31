@@ -158,6 +158,10 @@ void serialSeekAndCache() {
     fixture.frame();
     require(fixture.worker.tasks.empty() && player.frameReads() == reads && player.cacheHits() > 0,
             "Cached seek decoded the same frame again");
+    const auto statistics = player.statistics();
+    require(statistics["cacheLookups"].toInt() == 3 && statistics["cacheHits"].toInt() == 1 &&
+                statistics["cacheBytes"].toULongLong() <= statistics["cacheCapacityBytes"].toULongLong(),
+            "Cache telemetry counted coalesced requests as lookups or exceeded capacity");
 }
 
 void failureAndLifetime() {
@@ -503,6 +507,80 @@ void partialUploadsPreserveRollback() {
     require(player.frameIndex() == 0 && fixture.viewport.content().scene == previous && !player.playing(),
             "Partial sequence failure lost the last completed content");
 }
+
+void seekMetricsRequireTheMatchingCompletedTarget() {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    orbelio::SceneLoader::Clock::time_point time{};
+    orbelio::SequencePlayer player(fixture.loader, fixture.viewport, nullptr, [&] { return time; });
+    auto sequence = std::make_shared<orbelio::PlySequence>();
+    sequence->frames = {{0., "C:/test/0.ply"}, {.1, "C:/test/1.ply"}, {.2, "C:/test/2.ply"}};
+    sequence->endTimeSeconds = .3;
+    player.activate(sequence, fixture.viewport.content().scene);
+    player.seek(.1);
+    time += 2ms;
+    player.seek(.2);
+    fixture.read();
+    player.acceptFrame(fixture.report().frame, {});
+    require(player.statistics()["seekTargetReadyMs"].toMap()["samples"].toInt() == 0,
+            "Obsolete frame completed a newer Seek request");
+    time += 3ms;
+    fixture.read();
+    auto target = fixture.report().frame;
+    target.refining = true;
+    player.acceptFrame(target, {});
+    time += 5ms;
+    target.refining = false;
+    player.acceptFrame(target, {});
+    player.acceptFrame(target, {});
+    const auto stats = player.statistics();
+    require(stats["supersededSeeks"].toInt() == 1 &&
+                stats["seekFirstVisibleMs"].toMap()["p50"].toDouble() == 3. &&
+                stats["seekTargetReadyMs"].toMap()["p50"].toDouble() == 8. &&
+                stats["seekTargetReadyMs"].toMap()["samples"].toInt() == 1,
+            "Seek metrics mixed first visibility, target readiness or duplicate completion");
+    const auto completed = stats["lastCompletedSeek"].toMap();
+    require(completed["requestId"].toInt() == 2 && completed["frameIndex"].toInt() == 2 &&
+                completed["timestampSeconds"].toDouble() == .2 &&
+                completed["sceneVersion"].toULongLong() == target.sceneVersion,
+            "Completed Seek lost request, target or rendered-version identity");
+    player.seek(.2);
+    require(player.statistics()["noOpSeeks"].toInt() == 1 &&
+                player.statistics()["seekTargetReadyMs"].toMap()["samples"].toInt() == 1,
+            "No-op Seek fabricated a zero latency sample");
+    player.seek(.1);
+    auto failed = fixture.report().frame;
+    failed.refining = true;
+    player.acceptFrame(failed, {});
+    player.acceptFrame(failed, "injected upload failure");
+    require(player.statistics()["failedSeeks"].toInt() == 1 &&
+                player.statistics()["seekFirstVisibleMs"].toMap()["samples"].toInt() == 1 &&
+                player.statistics()["seekTargetReadyMs"].toMap()["samples"].toInt() == 1,
+            "Failed progressive Seek entered successful latency samples");
+}
+
+void inspectorPublishesTheConfirmedFrameWithoutPerformanceRefresh() {
+    Fixture fixture;
+    int notifications = 0;
+    QObject::connect(
+        &fixture.model, &orbelio::AppModel::inspectorChanged, &fixture.model, [&] { ++notifications; });
+    const auto initialInfo = fixture.model.inspector();
+    auto& player = fixture.model.sequencePlayer();
+    player.setLooping(true);
+    player.setPlaying(true);
+    player.advance(.01);
+    player.setPlaying(false);
+    player.setLooping(false);
+    require(notifications == 0 && fixture.model.inspector() == initialInfo,
+            "Playback controls refreshed unchanged Inspector metadata");
+    fixture.model.sequencePlayer().seek(.5);
+    fixture.read();
+    const auto beforeCompletion = notifications;
+    fixture.frame();
+    require(notifications > beforeCompletion && fixture.model.inspector()["frameIndex"].toInt() == 5 &&
+                fixture.model.inspector()["gaussians"].toInt() == 8,
+            "Performance throttling hid the newly confirmed Inspector frame");
+}
 }
 
 int main(int argc, char** argv) {
@@ -523,6 +601,8 @@ int main(int argc, char** argv) {
         retryNotificationMayUnloadTheModel();
         renderSettingsKeepContentAndScheduleRefinement();
         partialUploadsPreserveRollback();
+        seekMetricsRequireTheMatchingCompletedTarget();
+        inspectorPublishesTheConfirmedFrameWithoutPerformanceRefresh();
         std::cout << "30 variable-count frames, serialized GPU acknowledgement, cache and recovery passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -14,6 +14,7 @@
 #include <map>
 #include <chrono>
 #include <optional>
+#include <array>
 
 namespace orbelio {
 class AppModel final : public QObject {
@@ -22,6 +23,10 @@ class AppModel final : public QObject {
     Q_PROPERTY(bool validation READ validation CONSTANT)
     Q_PROPERTY(QString ioStatus READ ioStatus NOTIFY changed)
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY changed)
+    Q_PROPERTY(QVariantMap inspector READ inspector NOTIFY inspectorChanged)
+    Q_PROPERTY(int attributeView READ attributeView WRITE setAttributeView NOTIFY renderSettingsChanged)
+    Q_PROPERTY(double attributeMinimum READ attributeMinimum NOTIFY renderSettingsChanged)
+    Q_PROPERTY(double attributeMaximum READ attributeMaximum NOTIFY renderSettingsChanged)
     Q_PROPERTY(QString loadState READ loadState NOTIFY changed)
     Q_PROPERTY(bool loading READ isLoading NOTIFY changed)
     Q_PROPERTY(bool hasScene READ hasScene NOTIFY changed)
@@ -47,6 +52,17 @@ public:
     QString ioStatus() const { return ioStatus_; }
 
     QVariantMap performance() const { return performance_; }
+
+    QVariantMap inspector() const;
+
+    int attributeView() const { return int(viewport_.renderSettings().attributeView); }
+
+    double attributeMinimum() const { return viewport_.renderSettings().attributeMinimum; }
+
+    double attributeMaximum() const { return viewport_.renderSettings().attributeMaximum; }
+
+    void setAttributeView(int value);
+    Q_INVOKABLE bool setAttributeRange(double minimum, double maximum);
 
     QString loadState() const;
 
@@ -84,6 +100,7 @@ public:
 Q_SIGNALS:
     void sceneLoaded(double ioMilliseconds);
     void sceneChanged();
+    void inspectorChanged();
     void changed();
     void frameRequested();
     void renderSettingsChanged();
@@ -100,6 +117,7 @@ private:
 
     void resetMeasurements();
     void setRenderSettings(RenderSettings settings);
+    void resetAttributeRanges();
 
     void dispatchPendingRequest();
     void finishModelRead(const LoadRequest& request, SceneLoadResult result);
@@ -143,5 +161,6 @@ private:
     QVariantMap performance_;
     std::uint32_t viewportWidth_ = 0;
     std::uint32_t viewportHeight_ = 0;
+    std::array<std::pair<float, float>, 4> attributeRanges_{{{0, 1}, {0, 10}, {0, 1}, {.001f, 1}}};
 };
 } // namespace orbelio

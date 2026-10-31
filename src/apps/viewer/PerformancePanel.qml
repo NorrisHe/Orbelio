@@ -7,11 +7,13 @@ Rectangle {
     required property var editor
     property bool resources: false
     property var perf: appModel.performance
+    readonly property var sequenceStats: appModel.timeline.statistics
     readonly property var timings: [
         ["CPU 完成帧", "completeFrameMs"], ["完成帧间隔", "completedIntervalMs"],
         ["CPU 引擎（含等待）", "engineBlockingMs"], ["CPU Qt 合成区间", "qtCompositionCpuSpanMs"],
         ["后端等待", "backendWaitMs"], ["Qt 完成等待", "qtCompletionWaitMs"],
         ["全部 GPU 等待", "allGpuWaitsMs"], ["查询读回", "queryReadbackCpuMs"],
+        ["CPU 时间条件化", "temporalEvaluationCpuMs"],
         ["GPU 预处理", "gpuPreprocessMs"], ["GPU 深度排序", "gpuDepthSortMs"],
         ["GPU 光栅与瓦片排序", "gpuRasterAndTileSortMs"], ["GPU 图像合成", "gpuImageComposeMs"],
         ["GPU GS 阶段合计", "gpuGsStagesMs"]
@@ -35,6 +37,13 @@ Rectangle {
     color: "#f5111820"
     border.color: "#30a1b4c6"
     function metric(rows, key) { return (rows || {})[key] ?? "unavailable" }
+    function sequenceTiming(key) {
+        const value = sequenceStats[key]
+        return value && value.samples > 0 ? Number(value.p50).toFixed(2) + " / " + Number(value.p95).toFixed(2) + " ms" : "不可用"
+    }
+    function cacheSize() {
+        return sequenceStats.cacheBytes == null ? "不适用" : (sequenceStats.cacheBytes / 1048576).toFixed(1) + " / " + (sequenceStats.cacheCapacityBytes / 1048576).toFixed(1) + " MiB"
+    }
     ScrollView {
         anchors.fill: parent; anchors.margins: 21
         contentWidth: availableWidth; clip: true
@@ -50,14 +59,25 @@ Rectangle {
                     onClicked: editor.perfOpen = false
                 }
             }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 0
+                UiButton { objectName: "inspectorTab"; text: "模型"; selected: editor.inspectorOpen; underlined: true; Layout.fillWidth: true; onClicked: editor.inspectorOpen = true }
+                UiButton { objectName: "performanceTab"; text: "性能"; selected: !editor.inspectorOpen; underlined: true; Layout.fillWidth: true; onClicked: editor.inspectorOpen = false }
+            }
+            InspectorPanel { editor: panel.editor; Layout.fillWidth: true; visible: editor.inspectorOpen }
+            ColumnLayout {
+                Layout.fillWidth: true; spacing: 16; visible: !editor.inspectorOpen
             Row {
                 spacing: 10
                 Text {
                     id: fpsValue
-                    text: panel.perf.fps == null ? "unavailable" : Number(panel.perf.fps).toFixed(1)
+                    objectName: "fpsValue"
+                    width: 150
+                    text: panel.perf.fps == null ? "—" : Number(panel.perf.fps).toFixed(1)
+                    Accessible.name: panel.perf.fps == null ? "FPS 不可用，尚无有效完成帧" : text + " FPS"
                     color: editor.ink; font.pixelSize: 40; font.weight: Font.Light
                 }
-                Text { text: "FPS"; color: editor.muted; font.pixelSize: 12; anchors.baseline: fpsValue.baseline }
+                Text { objectName: "fpsUnit"; text: "FPS"; color: editor.muted; font.pixelSize: 12; anchors.baseline: fpsValue.baseline }
             }
             RowLayout {
                 Layout.fillWidth: true; spacing: 0
@@ -144,6 +164,33 @@ Rectangle {
                 Layout.fillWidth: true; Layout.topMargin: 6
                 text: appModel.gpuName; wrapMode: Text.WordWrap
                 color: editor.muted; font.pixelSize: 11
+            }
+            ColumnLayout {
+                visible: appModel.timeline.active; Layout.fillWidth: true; spacing: 16
+                Rectangle { height: 1; Layout.fillWidth: true; color: editor.rule }
+                Repeater {
+                    model: [["缓存使用 / 容量", panel.cacheSize()],
+                            ["缓存命中 / 查询", panel.sequenceStats.cacheLookups == null ? "不适用" : panel.sequenceStats.cacheHits + " / " + panel.sequenceStats.cacheLookups],
+                            ["Seek 可见 p50/p95", panel.sequenceTiming("seekFirstVisibleMs")],
+                            ["Seek 就绪 p50/p95", panel.sequenceTiming("seekTargetReadyMs")],
+                            ["Seek 有效样本", (panel.sequenceStats.seekTargetReadyMs?.samples ?? 0) + " / 120"],
+                            ["读取队列", panel.sequenceTiming("workerQueueMs")],
+                            ["文件读取", panel.sequenceTiming("readMs")],
+                            ["解码与关联资源", panel.sequenceTiming("decodeMs")],
+                            ["完成回调队列", panel.sequenceTiming("completionQueueMs")],
+                            ["加载总耗时", panel.sequenceTiming("loadTotalMs")]]
+                    RowLayout {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Text { text: modelData[0]; color: editor.muted; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                        Text {
+                            text: modelData[1]; color: editor.ink; font.pixelSize: 11; font.family: "Consolas"
+                            Layout.preferredWidth: 158; Layout.minimumWidth: 158; Layout.maximumWidth: 158
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+                }
+            }
             }
         }
     }

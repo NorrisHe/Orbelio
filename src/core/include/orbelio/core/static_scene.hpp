@@ -5,8 +5,14 @@
 #include <span>
 #include <vector>
 #include <string>
+#include <optional>
 
 namespace orbelio {
+struct CenterBounds {
+    std::array<float, 3> minimum{};
+    std::array<float, 3> maximum{};
+};
+
 struct StaticScene {
     MemoryBudget::Reservation memory;
     std::vector<float> positions;
@@ -20,6 +26,8 @@ struct StaticScene {
     std::string format = "Compressed PLY";
     std::array<float, 3> center{};
     float radius = 1;
+    std::optional<CenterBounds> centerBounds;
+    std::optional<std::array<float, 2>> logScaleRange;
 
     std::size_t count() const { return opacityLogits.size(); }
 

@@ -22,6 +22,7 @@ Rectangle {
     readonly property color muted: "#a7b2bf"
     readonly property color rule: "#33b2c4d5"
     property bool perfOpen: false
+    property bool inspectorOpen: false
     property bool bookmarksOpen: false
     property string outputStatus: ""
     property bool outputPending: false
@@ -243,7 +244,11 @@ Rectangle {
                 objectName: "performanceButton"
                 glyph: "Pulse"; width: 34; height: 34; circle: true
                 selected: root.perfOpen; Accessible.name: "性能检查"
-                onClicked: { root.clearMovement(); root.perfOpen = !root.perfOpen }
+                onClicked: {
+                    root.clearMovement()
+                    root.perfOpen = !root.perfOpen || root.inspectorOpen
+                    root.inspectorOpen = false
+                }
             }
         }
     }
@@ -266,6 +271,11 @@ Rectangle {
                     palette.highlightedText: "#ddb263"
                     background: Rectangle { color: "#19212b"; border.color: "#41505d"; radius: 3 }
                     MenuItem { text: "打开模型…"; onTriggered: modelFileDialog.open() }
+                    MenuItem {
+                        objectName: "inspectModelButton"
+                        text: "模型属性"; enabled: appModel.hasScene
+                        onTriggered: { root.clearMovement(); root.inspectorOpen = true; root.perfOpen = true }
+                    }
                     MenuItem {
                         objectName: "unloadModelButton"
                         text: "卸载模型"; enabled: appModel.hasScene || appModel.loading

@@ -12,7 +12,7 @@ foreach(icon IN LISTS viewer_icon_names)
         assets/icons/${icon}-dark.png)
 endforeach()
 qt_add_qml_module(orbelio_viewer URI Orbelio VERSION 1.0
-    QML_FILES Main.qml UiButton.qml BookmarksPanel.qml PerformancePanel.qml ExportDialog.qml SequenceTimeline.qml
+    QML_FILES Main.qml UiButton.qml BookmarksPanel.qml PerformancePanel.qml InspectorPanel.qml ExportDialog.qml SequenceTimeline.qml
     RESOURCES ${viewer_icons})
 qt_add_resources(orbelio_viewer viewer_sample PREFIX "/samples" BASE "${PROJECT_SOURCE_DIR}/samples"
     FILES "${PROJECT_SOURCE_DIR}/samples/guitar/guitar.compressed.ply")

@@ -4,9 +4,14 @@
 #include <cstdint>
 
 namespace orbelio {
+enum class AttributeView : std::uint32_t { Normal, Depth, Opacity, Scale };
+
 struct RenderSettings {
     std::uint32_t maxGaussians = 0;
     std::uint32_t uploadGaussiansPerFrame = 262144;
+    AttributeView attributeView = AttributeView::Normal;
+    float attributeMinimum = 0;
+    float attributeMaximum = 10;
     bool operator==(const RenderSettings&) const = default;
 
     std::size_t budgetedCount(std::size_t total) const {
