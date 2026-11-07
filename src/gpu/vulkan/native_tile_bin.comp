@@ -1,0 +1,43 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+#include "native_tile_intersection.glsl"
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Indices { uint indices[]; };
+layout(set=0,binding=1,std430) writeonly buffer Counts { uint counts[]; };
+layout(set=0,binding=2,std430) writeonly buffer Bounds { uvec4 bounds[]; };
+layout(set=0,binding=3,std430) buffer Control { uint control[]; };
+layout(set=0,binding=4,std430) readonly buffer DepthKeys { uint depths[]; };
+void main() {
+    uint order=gl_GlobalInvocationID.x;
+    if (order>=p.count) return;
+    counts[order]=0;
+    // Clear the final partial workgroup too: regular emission reads its padded lanes.
+    uint sources=control[sourceCountWord];
+    if (order>=sources) return;
+    // Sorted sentinels reject invisible points without a strided projected-splat load.
+    if (depths[order]==0xffffffffu) return;
+    bounds[order]=uvec4(0);
+    ProjectedSplat splat=p.projected.values[indices[order]];
+    if (splat.color.w<0) return;
+    uvec4 rectangle=clippedTileBounds(splat,binningShift());
+    uvec2 first=rectangle.xy;
+    uvec2 last=rectangle.zw;
+    if (any(greaterThan(first,last))) return;
+    bounds[order]=packTileBounds(uvec4(first,last),indices[order],p.columns);
+    if (cooperativeBounds(uvec4(first,last))) {
+        uint task=atomicAdd(control[cooperativeCountWord],1);
+        uint at=cooperativeTasksWord+task*2;
+        control[at]=order;
+        control[at+1]=indices[order];
+        return;
+    }
+    uint count=0;
+    for (uint y=first.y; y<=last.y; ++y) {
+        for (uint x=first.x; x<=last.x; ++x) {
+            if (intersectsTile(uvec2(x,y),splat)) ++count;
+            if (count>p.capacity) { counts[order]=p.capacity+1; return; }
+        }
+    }
+    counts[order]=count;
+}

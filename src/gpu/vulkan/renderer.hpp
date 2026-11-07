@@ -2,6 +2,7 @@
 
 #include "device_context.hpp"
 #include "renderer_stats.hpp"
+#include "render_images.hpp"
 #include <orbelio/core/types.hpp>
 #include <memory>
 
@@ -14,6 +15,7 @@ public:
     virtual FrameReport finishFrame() = 0;
     virtual void waitIdle() noexcept = 0;
     virtual VkImage image() const = 0;
+    virtual VulkanRenderImages outputImages() const = 0;
     virtual std::uint32_t width() const = 0;
     virtual std::uint32_t height() const = 0;
 };

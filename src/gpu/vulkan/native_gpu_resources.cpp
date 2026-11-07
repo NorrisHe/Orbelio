@@ -9,7 +9,7 @@
 namespace orbelio {
 namespace {
 constexpr std::size_t minimumBufferBytes = sizeof(std::uint32_t);
-constexpr std::size_t maximumBufferBindings = 6;
+constexpr std::size_t maximumBufferBindings = 7;
 
 std::vector<std::uint32_t> shaderCode(std::string_view directory, std::string_view name) {
     const std::string_view rootText = directory.empty() ? ORBELIO_NATIVE_SHADER_DIR : directory;
@@ -135,8 +135,16 @@ void createNativeCompute(DeviceContext context,
                          std::uint32_t pushBytes) {
     std::array<VkDescriptorType, maximumBufferBindings> types{};
     types.fill(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-    createNativeLayout(
-        context, pipeline, std::span(types).first(bindings), VK_SHADER_STAGE_COMPUTE_BIT, pushBytes);
+    createNativeCompute(context, pipeline, directory, name, std::span(types).first(bindings), pushBytes);
+}
+
+void createNativeCompute(DeviceContext context,
+                         NativePipeline& pipeline,
+                         std::string_view directory,
+                         std::string_view name,
+                         std::span<const VkDescriptorType> types,
+                         std::uint32_t pushBytes) {
+    createNativeLayout(context, pipeline, types, VK_SHADER_STAGE_COMPUTE_BIT, pushBytes);
     const auto shader = loadNativeShader(context, directory, name);
     auto info = vkInfo<VkComputePipelineCreateInfo>(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
     info.layout = pipeline.layout;
@@ -153,11 +161,12 @@ void createNativeCompute(DeviceContext context,
 void bindNativeBuffers(VkCommandBuffer command,
                        const NativePipeline& pipeline,
                        VkPipelineBindPoint bindPoint,
-                       std::initializer_list<const NativeBuffer*> buffers) {
+                       std::initializer_list<const NativeBuffer*> buffers,
+                       const NativeBuffer* control) {
     std::array<VkDescriptorBufferInfo, maximumBufferBindings> infos{};
     std::array<VkWriteDescriptorSet, maximumBufferBindings> writes{};
     std::size_t i = 0;
-    for (const auto* buffer : buffers) {
+    const auto append = [&infos, &writes, &i](const NativeBuffer* buffer) {
         infos[i] = {buffer->handle, 0, buffer->capacity};
         writes[i] = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
         writes[i].dstBinding = static_cast<std::uint32_t>(i);
@@ -165,10 +174,23 @@ void bindNativeBuffers(VkCommandBuffer command,
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &infos[i];
         ++i;
+    };
+    for (const auto* buffer : buffers) {
+        append(buffer);
+    }
+    if (control) {
+        append(control);
     }
     vkCmdBindPipeline(command, bindPoint, pipeline.handle);
     vkCmdPushDescriptorSetKHR(
         command, bindPoint, pipeline.layout, 0, static_cast<std::uint32_t>(i), writes.data());
+}
+
+void nativeImageBarrier(VkCommandBuffer command,
+                        VkPipelineStageFlags sourceStage,
+                        VkPipelineStageFlags destinationStage,
+                        const VkImageMemoryBarrier& barrier) {
+    vkCmdPipelineBarrier(command, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
 void nativeMemoryBarrier(VkCommandBuffer command,

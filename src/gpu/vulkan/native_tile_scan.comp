@@ -1,0 +1,29 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Input { uint counts[]; };
+layout(set=0,binding=1,std430) writeonly buffer Offsets { uint offsets[]; };
+layout(set=0,binding=2,std430) writeonly buffer Totals { uint totals[]; };
+layout(set=0,binding=3,std430) readonly buffer Control { uint control[]; };
+shared uint sums[256];
+void main() {
+    uint lane=gl_LocalInvocationIndex;
+    uint i=gl_GlobalInvocationID.x;
+    uint count=control[sourceCountWord];
+    uint level=(p.options>>4)&3u;
+    for (uint n=0; n<level; ++n) count=(count+255)/256;
+    count=min(count,p.count);
+    sums[lane]=i<count ? counts[i] : 0;
+    barrier();
+    for (uint stride=1; stride<256; stride*=2) {
+        uint previous=lane>=stride ? sums[lane-stride] : 0;
+        barrier();
+        uint value=min(sums[lane]+previous,p.capacity+1);
+        barrier();
+        sums[lane]=value;
+        barrier();
+    }
+    if (i<count) offsets[i]=lane==0 ? 0 : sums[lane-1];
+    if (lane==255) totals[gl_WorkGroupID.x]=sums[lane];
+}

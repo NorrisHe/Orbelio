@@ -1,0 +1,201 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#ifdef TILE_MACRO_DIAGNOSTICS
+#define TILE_MACRO
+#define TILE_DIAGNOSTICS
+#endif
+#include "native_tile_parameters.glsl"
+#ifdef TILE_MACRO
+#include "native_tile_intersection.glsl"
+#endif
+#include "native_alpha.glsl"
+layout(local_size_x=16,local_size_y=16) in;
+layout(set=0,binding=0,std430) readonly buffer Orders { uint orders[]; };
+layout(set=0,binding=1,std430) readonly buffer Indices { uint indices[]; };
+layout(set=0,binding=2,std430) readonly buffer Depths { uint depths[]; };
+layout(set=0,binding=3,std430) readonly buffer Ranges { uvec2 ranges[]; };
+layout(set=0,binding=4,rgba32f) writeonly uniform image2D accumulated;
+layout(set=0,binding=5,rgba32f) writeonly uniform image2D accumulatedDepth;
+#ifdef NORMAL_OUTPUT
+layout(set=0,binding=6,std430) readonly buffer Normals { vec4 normals[]; };
+layout(set=0,binding=7,rgba32f) writeonly uniform image2D accumulatedNormals;
+// Half batches keep the extra vectors within Vulkan's 16 KiB shared-memory minimum.
+#define BATCH_SIZE 128
+#define DIAGNOSTICS_BINDING 8
+shared vec4 batchNormals[BATCH_SIZE];
+#else
+#define BATCH_SIZE tileGroupSize
+#define DIAGNOSTICS_BINDING 6
+#endif
+shared ProjectedSplat batch[BATCH_SIZE];
+shared float batchDepth[BATCH_SIZE];
+shared uint finished;
+#ifdef TILE_MACRO
+const uint maskWordBits=32;
+const uint maskWordCount=tileGroupSize/maskWordBits;
+shared uint candidateMask[maskWordCount];
+shared uint selectedCount;
+#endif
+#ifdef TILE_DIAGNOSTICS
+layout(set=0,binding=DIAGNOSTICS_BINDING,std430) buffer Diagnostics { uint metrics[]; };
+shared uint testedGroup;
+shared uint contributingGroup;
+shared uint tailGroup;
+shared uint zeroGroup;
+shared uint opaqueGroup;
+
+void addMetric64(uint word, uint value) {
+    uint previous=atomicAdd(metrics[word],value);
+    if (previous>0xffffffffu-value) atomicAdd(metrics[word+1],1);
+}
+#endif
+
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+#ifdef TILE_MACRO
+    uint scale=binningScale();
+    uint child=gl_WorkGroupID.x&((1u<<(2u*scale))-1u);
+    uvec2 bin=uvec2(gl_WorkGroupID.x>>(2u*scale),gl_WorkGroupID.y);
+    // Neighboring workgroups reuse one coarse list without changing per-pixel depth order.
+    uvec2 tile=(bin<<scale)+uvec2(child&((1u<<scale)-1u),child>>scale);
+    uvec2 origin=tile*tileWidth;
+    if (any(greaterThanEqual(origin,p.viewport))) return;
+    uvec2 pixel=origin+gl_LocalInvocationID.xy;
+#else
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+#endif
+    bool valid = all(lessThan(pixel,p.viewport));
+    bool done = !valid;
+    if (lane==0) {
+        finished=0;
+#ifdef TILE_DIAGNOSTICS
+        testedGroup=0;
+        contributingGroup=0;
+        tailGroup=0;
+        zeroGroup=0;
+        opaqueGroup=0;
+#endif
+    }
+    barrier();
+    if (done) atomicAdd(finished,1);
+    barrier();
+#ifdef TILE_MACRO
+    uvec2 range = ranges[bin.y*p.columns+bin.x];
+#else
+    uvec2 range = ranges[gl_WorkGroupID.y*p.columns+gl_WorkGroupID.x];
+#endif
+    precise vec3 rgb = vec3(0);
+    precise float transmittance = 1;
+    precise float depth = 0;
+#ifdef NORMAL_OUTPUT
+    precise vec3 normal = vec3(0);
+#endif
+#ifdef TILE_DIAGNOSTICS
+    uint tested=0;
+    uint contributing=0;
+    uint tail=0;
+#endif
+    for (uint cursor=range.x; cursor<range.y; cursor+=BATCH_SIZE) {
+        if (finished==tileGroupSize) break;
+        uint size = min(BATCH_SIZE,range.y-cursor);
+#ifdef TILE_MACRO
+        if (lane<maskWordCount) candidateMask[lane]=0;
+        barrier();
+        ProjectedSplat candidate;
+        uint order=0;
+        bool included=false;
+        if (lane<size) {
+            order=orders[cursor+lane];
+            candidate=p.projected.values[indices[order]];
+            uvec4 rectangle=clippedTileBounds(candidate,tileShift);
+            included=all(greaterThanEqual(tile,rectangle.xy)) &&
+                     all(lessThanEqual(tile,rectangle.zw)) &&
+                     intersectsTileAtWidth(tile,candidate,tileWidth);
+            if (included) atomicOr(candidateMask[lane/maskWordBits],1u<<(lane%maskWordBits));
+        }
+        barrier();
+        if (included) {
+            uint word=lane/maskWordBits;
+            uint rank=bitCount(candidateMask[word]&((1u<<(lane%maskWordBits))-1u));
+            for (uint i=0; i<word; ++i) rank+=bitCount(candidateMask[i]);
+            // Ballot ranks preserve the global depth order across every compacted batch.
+            batch[rank]=candidate;
+            if ((p.options&2u)!=0) batchDepth[rank]=uintBitsToFloat(depths[order]);
+#ifdef NORMAL_OUTPUT
+            batchNormals[rank]=normals[indices[order]];
+#endif
+        }
+        if (lane==0) {
+            selectedCount=0;
+            for (uint i=0; i<maskWordCount; ++i) selectedCount+=bitCount(candidateMask[i]);
+        }
+        barrier();
+        size=selectedCount;
+#else
+        if (lane<size) {
+            uint order = orders[cursor+lane];
+            batch[lane] = p.projected.values[indices[order]];
+            if ((p.options&2u)!=0) batchDepth[lane] = uintBitsToFloat(depths[order]);
+#ifdef NORMAL_OUTPUT
+            batchNormals[lane]=normals[indices[order]];
+#endif
+        }
+        barrier();
+#endif
+        if (!done) {
+            for (uint i=0; i<size; ++i) {
+#ifdef TILE_DIAGNOSTICS
+                tested++;
+                if (transmittance<0.0001) tail++;
+#endif
+                float alpha = gaussianAlpha(vec2(pixel)+0.5,batch[i].rectangle.xy,
+                                            batch[i].conicOpacity,batch[i].color.w);
+                if (alpha==0) continue;
+#ifdef TILE_DIAGNOSTICS
+                contributing++;
+#endif
+                precise vec3 premultiplied = batch[i].color.rgb*alpha;
+                rgb += transmittance*premultiplied;
+                if ((p.options&2u)!=0) {
+                    precise float premultipliedDepth = batchDepth[i]*alpha;
+                    depth += transmittance*premultipliedDepth;
+                }
+#ifdef NORMAL_OUTPUT
+                precise vec3 premultipliedNormal = batchNormals[i].xyz*alpha;
+                normal += transmittance*premultipliedNormal;
+#endif
+                transmittance *= 1-alpha;
+                // Preserve float and HDR outputs: terminate only when the remaining weight is zero.
+                if (transmittance==0) {
+                    done=true;
+                    atomicAdd(finished,1);
+                    break;
+                }
+            }
+        }
+        barrier();
+    }
+    if (valid) {
+        imageStore(accumulated,ivec2(pixel),vec4(rgb,transmittance));
+        if ((p.options&2u)!=0)
+            imageStore(accumulatedDepth,ivec2(pixel),vec4(depth,0,0,transmittance));
+#ifdef NORMAL_OUTPUT
+        imageStore(accumulatedNormals,ivec2(pixel),vec4(normal,transmittance));
+#endif
+    }
+#ifdef TILE_DIAGNOSTICS
+    atomicAdd(testedGroup,tested);
+    atomicAdd(contributingGroup,contributing);
+    atomicAdd(tailGroup,tail);
+    if (valid && transmittance==0) atomicAdd(zeroGroup,1);
+    if (valid && transmittance<0.0001) atomicAdd(opaqueGroup,1);
+    barrier();
+    if (lane==0) {
+        addMetric64(16,testedGroup);
+        addMetric64(18,contributingGroup);
+        atomicAdd(metrics[20],zeroGroup);
+        atomicAdd(metrics[21],opaqueGroup);
+        addMetric64(22,tailGroup);
+    }
+#endif
+}

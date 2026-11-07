@@ -208,6 +208,102 @@ void contentRollbackKeepsCameraAndCaptureIndependent() {
 }
 }
 
+namespace {
+void calibratedProjectionAndOrthographicControls() {
+    orbelio::CameraState camera;
+    camera.intrinsics = orbelio::CameraIntrinsics{500, 300, 77, 39, 640, 480};
+    camera.nearClip = .2f;
+    camera.farClip = 20;
+    const auto calibrated = orbelio::cameraView(camera, 1280, 960);
+    require(calibrated.intrinsics == std::array<float, 4>{1000, 600, 154, 78} &&
+                calibrated.depthRange == std::array<float, 2>{.2f, 20},
+            "Camera calibration or clipping was not scaled correctly");
+    camera.intrinsics.reset();
+    camera.projection = orbelio::CameraProjection::Orthographic;
+    camera.orthographicSpan = 4;
+    const auto view = orbelio::cameraView(camera, viewportWidth, viewportHeight);
+    require(view.intrinsics == std::array<float, 4>{150, 150, 400, 300},
+            "Orthographic scale does not use the shorter image dimension");
+    const auto distance = camera.distance;
+    camera.zoom(1);
+    require(camera.orthographicSpan < 4 && camera.distance == distance,
+            "Orthographic zoom must change scale without moving the eye");
+    const auto before = camera.target;
+    camera.pan(.1f, .2f);
+    for (std::size_t axis = 0; axis < before.size(); ++axis) {
+        require(
+            near(camera.target[axis],
+                 before[axis] - camera.orthographicSpan * (.1f * view.right[axis] + .2f * view.down[axis])),
+            "Orthographic pan does not preserve screen-space motion");
+    }
+    camera.intrinsics = orbelio::CameraIntrinsics{200, 200, 400, 300, 800, 600};
+    camera.zoom(1);
+    require(camera.intrinsics->fx > 200 && camera.intrinsics->fx == camera.intrinsics->fy,
+            "Calibrated orthographic zoom did not scale both focal lengths");
+}
+
+void rigidCameraMatricesRoundTrip() {
+    for (const auto pitch : {-90.f, -65.f, 0.f, 35.f, 90.f}) {
+        for (const auto yaw : {-140.f, 0.f, 83.f}) {
+            for (const auto roll : {-115.f, 0.f, 72.f}) {
+                orbelio::CameraState state;
+                state.target = {2, -3, 4};
+                state.yawDegrees = yaw;
+                state.pitchDegrees = pitch;
+                state.rollDegrees = roll;
+                const auto original = orbelio::cameraView(state, 640, 480);
+                const auto restored =
+                    orbelio::cameraView(orbelio::cameraFromViewMatrix(original.worldToCamera), 640, 480);
+                for (std::size_t i = 0; i < original.worldToCamera.size(); ++i) {
+                    require(std::abs(original.worldToCamera[i] - restored.worldToCamera[i]) < 2e-5f,
+                            "Rigid camera matrix round trip changed the view");
+                }
+            }
+        }
+    }
+    const auto invalid = orbelio::cameraView(orbelio::CameraState{}, 640, 480).worldToCamera;
+    for (const auto index : {0u, 3u, 15u}) {
+        auto changed = invalid;
+        changed[index] += 2;
+        bool rejected = false;
+        try {
+            orbelio::cameraFromViewMatrix(changed);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "Camera accepted a non-rigid view matrix");
+    }
+}
+
+void invalidProjectionIsRejected() {
+    for (int kind = 0; kind < 5; ++kind) {
+        orbelio::CameraState state;
+        if (kind == 0) {
+            state.nearClip = 0;
+        }
+        if (kind == 1) {
+            state.farClip = .001f;
+        }
+        if (kind == 2) {
+            state.intrinsics = orbelio::CameraIntrinsics{0, 1, 0, 0, 640, 480};
+        }
+        if (kind == 3) {
+            state.rollDegrees = std::numeric_limits<float>::quiet_NaN();
+        }
+        if (kind == 4) {
+            state.verticalFieldOfViewDegrees = 360;
+        }
+        bool rejected = false;
+        try {
+            orbelio::cameraView(state, 640, 480);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "Camera accepted invalid projection parameters");
+    }
+}
+}
+
 int main() {
     try {
         defaultViewMatchesExistingConvention();
@@ -217,6 +313,9 @@ int main() {
         freeFlightKeepsEyeAndNormalizesMovement();
         captureRequestsStayUniqueAfterCompletion();
         contentRollbackKeepsCameraAndCaptureIndependent();
+        calibratedProjectionAndOrthographicControls();
+        rigidCameraMatricesRoundTrip();
+        invalidProjectionIsRejected();
         std::cout << "Camera framing, gestures, limits, DPI and snapshot isolation: PASS\n";
         return 0;
     } catch (const std::exception& error) {

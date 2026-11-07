@@ -102,6 +102,7 @@ std::optional<VulkanHost::Admission> VulkanHost::probeAdmission(VkPhysicalDevice
     admission.synchronization2 = supported13.synchronization2;
     admission.timelineSemaphore = supported12.timelineSemaphore;
     admission.bufferDeviceAddress = supported12.bufferDeviceAddress;
+    admission.pipelineStatistics = supported.features.pipelineStatisticsQuery;
 
     if (!admission.pushDescriptors || !admission.synchronization2 || !admission.bufferDeviceAddress ||
         admission.properties.limits.maxPushConstantsSize < requiredPushConstantBytes ||
@@ -154,12 +155,16 @@ void VulkanHost::createLogicalDevice(VkPhysicalDevice physical,
     info.queueCreateInfoCount = 1;
     info.pQueueCreateInfos = &queueInfo;
     info.pNext = &f12;
+    VkPhysicalDeviceFeatures features{};
+    features.pipelineStatisticsQuery = admission.pipelineStatistics;
+    info.pEnabledFeatures = &features;
     info.enabledExtensionCount = 2;
     info.ppEnabledExtensionNames = extensions;
 
     vkCheck(vkCreateDevice(physical, &info, nullptr, &context_.device), "vkCreateDevice");
     context_.physicalDevice = physical;
     context_.queueFamily = queueFamily;
+    context_.pipelineStatisticsEnabled = admission.pipelineStatistics;
     volkLoadDevice(context_.device);
     vkGetDeviceQueue(context_.device, queueFamily, 0, &context_.queue);
     deviceName_ = QString::fromUtf8(admission.properties.deviceName);

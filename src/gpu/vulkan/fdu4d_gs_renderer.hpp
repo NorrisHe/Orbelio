@@ -1,11 +1,13 @@
 #pragma once
-#include "static_gs_renderer.hpp"
+#include "native_gaussian_renderer.hpp"
 
 namespace orbelio {
 class Fdu4dGsRenderer final : public IGaussianRenderer {
 public:
     Fdu4dGsRenderer(DeviceContext context, VmaAllocator allocator, std::string shaderDirectory = {})
         : rasterizer_(context, allocator, std::move(shaderDirectory)) {}
+
+    VulkanRenderImages outputImages() const override { return rasterizer_.outputImages(); }
 
     void render(const FrameState& frame,
                 VkImage image,
@@ -14,9 +16,6 @@ public:
                 FrameReport& report) override;
 
 private:
-    StaticGsRenderer rasterizer_;
-    std::shared_ptr<const Fdu4dScene> source_;
-    std::shared_ptr<const StaticScene> evaluated_;
-    double time_ = 0;
+    NativeGaussianRenderer rasterizer_;
 };
 }

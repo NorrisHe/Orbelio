@@ -17,7 +17,15 @@ struct FrameCapture {
     std::uint64_t requestId = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    RenderOutput outputs = RenderOutput::Display;
     std::vector<std::uint8_t> rgba;
+    // Premultiplied RGB in the scene's color space, and opacity, without background. Four floats/pixel.
+    std::vector<float> floatColorAlpha;
+    // Weighted camera Z, expected camera Z, transmittance, opacity. Four floats per pixel.
+    std::vector<float> depth;
+    // Weighted camera-facing world-space shortest axes (XYZ), then transmittance.
+    // The signed sum retains the coverage weight. Background is (0, 0, 0, 1).
+    std::vector<float> normals;
 };
 
 struct FrameState {
@@ -26,6 +34,8 @@ struct FrameState {
     std::uint64_t sceneVersion = 0;
     CameraState camera{};
     std::uint64_t captureRequestId = 0; // Zero keeps viewport pixels on the GPU.
+    RenderOutput captureOutputs = RenderOutput::Display;
+    std::size_t captureBudgetBytes = 64 * 1024 * 1024;
     double timestampSeconds = 0.0;
     std::uint32_t width = 1;
     std::uint32_t height = 1;
@@ -54,7 +64,9 @@ struct FrameStats {
     std::shared_ptr<const FrameCapture> capture;
 
     std::optional<double> projectionGpuMs;
+    std::optional<double> shadingGpuMs;
     std::optional<double> sortingGpuMs;
+    std::optional<double> binningGpuMs;
     std::optional<double> rasterGpuMs;
     std::optional<double> composeGpuMs;
     std::optional<double> gpuRenderMs;

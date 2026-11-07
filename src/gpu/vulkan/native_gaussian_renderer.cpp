@@ -1,5 +1,8 @@
-#include "static_gs_renderer.hpp"
+#include "native_gaussian_renderer.hpp"
 #include "native_radix_sort.hpp"
+#include "native_render_targets.hpp"
+#include "native_capture.hpp"
+#include "native_tile_raster.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -14,20 +17,27 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::uint32_t projectGroupSize = 256;
 constexpr std::uint32_t composeGroupSize = 16;
-constexpr std::uint32_t timestampCount = 5;
-constexpr std::uint32_t quadVertices = 4;
+// Rejected sentinels no longer extend the domain of positive FP32 camera depths.
+constexpr std::uint32_t positiveDepthKeyBits = 31;
+constexpr std::uint32_t frameTimestampCount = 7;
+constexpr std::uint32_t tileTimestampCount = 4;
+constexpr std::uint32_t timestampCount = frameTimestampCount + tileTimestampCount;
+constexpr std::size_t projectionCounterWords = 12;
+constexpr std::size_t projectionCounterBytes = projectionCounterWords * sizeof(std::uint32_t);
 constexpr std::size_t positionBytes = 4 * sizeof(float);
 constexpr std::size_t orientationBytes = 8 * sizeof(float);
 constexpr std::size_t projectedBytes = 12 * sizeof(float);
-constexpr std::size_t rgbaPixelBytes = 4;
-constexpr std::size_t accumulationPixelBytes = 4 * sizeof(float);
-constexpr VkFormat accumulationFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+constexpr std::size_t normalBytes = 4 * sizeof(float);
 constexpr auto counterInterval = std::chrono::milliseconds(250);
 constexpr auto fenceWaitNs = std::numeric_limits<std::uint64_t>::max();
 constexpr double fullTurnDegrees = 360.;
 constexpr VkBufferUsageFlags physicalBufferUsage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 constexpr VkBufferUsageFlags modelBufferUsage = physicalBufferUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+bool capacityError(const VulkanError& error) {
+    return error.result() == VK_ERROR_OUT_OF_DEVICE_MEMORY || error.result() == VK_ERROR_OUT_OF_HOST_MEMORY;
+}
 
 struct alignas(16) ProjectParameters {
     std::array<float, 4> right{};
@@ -41,12 +51,51 @@ struct alignas(16) ProjectParameters {
 
 static_assert(sizeof(ProjectParameters) == 128);
 
+struct alignas(16) ProjectionSettings {
+    std::array<float, 4> intrinsics{};
+    std::array<float, 4> clipping{};
+};
+
+static_assert(sizeof(ProjectionSettings) == 32);
+
 struct GraphicsParameters {
     VkDeviceAddress projected;
     std::array<float, 2> viewport;
 };
 
 static_assert(sizeof(GraphicsParameters) == 16);
+
+struct alignas(16) ComposeParameters {
+    std::array<float, 4> background{};
+    std::array<std::uint32_t, 4> controls{};
+};
+
+static_assert(sizeof(ComposeParameters) == 32);
+
+std::uint64_t counter64(const std::array<std::uint32_t, projectionCounterWords>& words, std::size_t first) {
+    return std::uint64_t(words[first]) | (std::uint64_t(words[first + 1]) << 32);
+}
+
+ProjectionDiagnostics decodeDiagnostics(const std::array<std::uint32_t, projectionCounterWords>& words) {
+    ProjectionDiagnostics result{};
+    result.clippedBoundingPixels = counter64(words, 1);
+    result.maximumBoundingPixels = words[3];
+    result.maximumEllipseArea = std::bit_cast<float>(words[4]);
+    result.nearOpaquePeaks = words[7];
+    result.maximumAxisRadius = std::bit_cast<float>(words[8]);
+    result.axisRadiusOver512 = words[9];
+    if (words[0]) {
+        result.meanPeakOpacity = double(counter64(words, 5)) / 65535. / words[0];
+        result.meanClippedEllipseAreaUpper = double(counter64(words, 10)) / 16. / words[0];
+    }
+    return result;
+}
+
+struct PreparedFrame {
+    CameraView camera;
+    NativeCapturePlan capture;
+    bool sample = false;
+};
 
 double milliseconds(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
@@ -63,13 +112,6 @@ VkImageMemoryBarrier imageBarrier(VkImage image, VkImageLayout before, VkImageLa
     return barrier;
 }
 
-void transition(VkCommandBuffer command,
-                const VkImageMemoryBarrier& barrier,
-                VkPipelineStageFlags before,
-                VkPipelineStageFlags after) {
-    vkCmdPipelineBarrier(command, before, after, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-}
-
 VkPipelineColorBlendAttachmentState blendState() {
     VkPipelineColorBlendAttachmentState blend{};
     blend.blendEnable = VK_TRUE;
@@ -83,41 +125,70 @@ VkPipelineColorBlendAttachmentState blendState() {
                            VK_COLOR_COMPONENT_A_BIT;
     return blend;
 }
+
+void validateSettings(const RenderSettings& settings) {
+    if (std::uint32_t(settings.rasterMode) > std::uint32_t(RasterMode::TiledCompute) ||
+        (settings.tileBinningWidth != 16 && settings.tileBinningWidth != 32 &&
+         settings.tileBinningWidth != 64) ||
+        !validOutputs(settings.outputs) || std::ranges::any_of(settings.background, [](float value) {
+            return !std::isfinite(value) || value < 0;
+        })) {
+        throw std::invalid_argument("Invalid render outputs or background");
+    }
 }
 
-struct StaticGsRenderer::Impl {
+void validateScene(const StaticScene& scene) {
+    const auto count = scene.count();
+    if (scene.shDegree > 3 || count > std::numeric_limits<std::uint32_t>::max() ||
+        scene.positions.size() != count * 3 || scene.rotations.size() != count * 4 ||
+        scene.logScales.size() != count * 3 || scene.sh0.size() != count * 3 ||
+        scene.shRest.size() != count * scene.shRestCoefficients() * 3) {
+        throw std::invalid_argument("Invalid Gaussian scene layout");
+    }
+}
+}
+
+struct NativeGaussianRenderer::Impl {
     DeviceContext context;
     VmaAllocator allocator;
     NativeBufferCounts counts;
     NativeRadixSort sorter;
+    NativeRenderTargets targets;
+    std::unique_ptr<NativeTileRaster> tiler;
+    std::optional<std::array<std::size_t, 5>> rejectedTile;
+    std::string shaderDirectory;
     NativePipeline projection;
+    NativePipeline projectionNormals;
+    NativePipeline shading;
     NativePipeline raster;
+    NativePipeline rasterDepth;
+    NativePipeline rasterNormals;
+    NativePipeline rasterDepthNormals;
     NativePipeline compose;
-    VkRenderPass renderPass = VK_NULL_HANDLE;
+    NativePipeline composeFloat;
     VkSampler sampler = VK_NULL_HANDLE;
     VkCommandPool commands = VK_NULL_HANDLE;
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     VkQueryPool queries = VK_NULL_HANDLE;
+    VkQueryPool statisticsQueries = VK_NULL_HANDLE;
     double timestampPeriod = 0;
     std::uint64_t timestampMask = 0;
-    VkImage rasterImage = VK_NULL_HANDLE;
-    VkImageView rasterView = VK_NULL_HANDLE;
-    VmaAllocation rasterMemory = VK_NULL_HANDLE;
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    std::uint32_t rasterWidth = 0;
-    std::uint32_t rasterHeight = 0;
     NativeBuffer positions;
+    NativeBuffer projectionSettings;
     NativeBuffer orientations;
     NativeBuffer harmonics;
     NativeBuffer projected;
+    NativeBuffer projectedNormals;
     NativeBuffer keys;
     NativeBuffer indices;
+    NativeBuffer visibility;
     NativeBuffer staging;
     NativeBuffer counter;
     NativeBuffer counterReadback;
     NativeBuffer pixelReadback;
     std::shared_ptr<const StaticScene> scene;
+    GaussianTemporalView temporal;
     std::shared_ptr<const FrameCapture> capture;
     std::size_t targetCount = 0;
     std::size_t uploadedCount = 0;
@@ -126,13 +197,14 @@ struct StaticGsRenderer::Impl {
     Clock::time_point lastCounterSample;
 
     Impl(DeviceContext c, VmaAllocator a, std::string_view directory)
-        : context(c), allocator(a), sorter(c, a, counts, directory) {
+        : context(c), allocator(a), sorter(c, a, counts, directory, NativeSortMode::VisibleDepths),
+          targets(c, a), shaderDirectory(directory) {
         try {
             createCommands();
-            createRenderPass();
             createSampler();
             createPipelines(directory);
             createQueries();
+            createStatisticsQueries();
         } catch (...) {
             destroy();
             throw;
@@ -141,42 +213,38 @@ struct StaticGsRenderer::Impl {
 
     ~Impl() { destroy(); }
 
-    void destroyRasterTarget() noexcept {
-        vkDestroyFramebuffer(context.device, framebuffer, nullptr);
-        vkDestroyImageView(context.device, rasterView, nullptr);
-        if (rasterImage) {
-            vmaDestroyImage(allocator, rasterImage, rasterMemory);
-        }
-        framebuffer = VK_NULL_HANDLE;
-        rasterView = VK_NULL_HANDLE;
-        rasterImage = VK_NULL_HANDLE;
-        rasterMemory = VK_NULL_HANDLE;
-        rasterWidth = 0;
-        rasterHeight = 0;
-    }
-
     void destroy() noexcept {
-        destroyRasterTarget();
         for (auto* buffer : {&positions,
+                             &projectionSettings,
                              &orientations,
                              &harmonics,
                              &projected,
+                             &projectedNormals,
                              &keys,
                              &indices,
+                             &visibility,
                              &staging,
                              &counter,
                              &counterReadback,
                              &pixelReadback}) {
             destroyBuffer(allocator, *buffer);
         }
-        for (auto* pipeline : {&projection, &raster, &compose}) {
+        for (auto* pipeline : {&projection,
+                               &projectionNormals,
+                               &shading,
+                               &raster,
+                               &rasterDepth,
+                               &rasterNormals,
+                               &rasterDepthNormals,
+                               &compose,
+                               &composeFloat}) {
             destroyPipeline(context, *pipeline);
         }
         vkDestroyQueryPool(context.device, queries, nullptr);
+        vkDestroyQueryPool(context.device, statisticsQueries, nullptr);
         vkDestroyFence(context.device, fence, nullptr);
         vkDestroyCommandPool(context.device, commands, nullptr);
         vkDestroySampler(context.device, sampler, nullptr);
-        vkDestroyRenderPass(context.device, renderPass, nullptr);
     }
 
     void createCommands() {
@@ -194,48 +262,6 @@ struct StaticGsRenderer::Impl {
         vkCheck(vkCreateFence(context.device, &info, nullptr, &fence), "vkCreateFence native");
     }
 
-    void createRenderPass() {
-        VkFormatProperties supported{};
-        vkGetPhysicalDeviceFormatProperties(context.physicalDevice, accumulationFormat, &supported);
-        if (!(supported.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT)) {
-            throw std::runtime_error("Native Gaussian rendering requires RGBA32F color blending");
-        }
-        VkAttachmentDescription attachment{};
-        attachment.format = accumulationFormat;
-        attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        const VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &reference;
-        const std::array<VkSubpassDependency, 2> dependencies{{{VK_SUBPASS_EXTERNAL,
-                                                                0,
-                                                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                                                VK_ACCESS_SHADER_READ_BIT,
-                                                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                                                0},
-                                                               {0,
-                                                                VK_SUBPASS_EXTERNAL,
-                                                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                                                                VK_ACCESS_SHADER_READ_BIT,
-                                                                0}}};
-        auto info = vkInfo<VkRenderPassCreateInfo>(VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO);
-        info.attachmentCount = 1;
-        info.pAttachments = &attachment;
-        info.subpassCount = 1;
-        info.pSubpasses = &subpass;
-        info.dependencyCount = static_cast<std::uint32_t>(dependencies.size());
-        info.pDependencies = dependencies.data();
-        vkCheck(vkCreateRenderPass(context.device, &info, nullptr, &renderPass), "vkCreateRenderPass native");
-    }
-
     void createSampler() {
         auto info = vkInfo<VkSamplerCreateInfo>(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
         info.magFilter = VK_FILTER_NEAREST;
@@ -247,14 +273,31 @@ struct StaticGsRenderer::Impl {
         vkCheck(vkCreateSampler(context.device, &info, nullptr, &sampler), "vkCreateSampler native");
     }
 
-    void createGraphicsPipeline(std::string_view directory) {
-        const std::array types{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-        createNativeLayout(context, raster, types, VK_SHADER_STAGE_VERTEX_BIT, sizeof(GraphicsParameters));
-        const auto vertex = loadNativeShader(context, directory, "native_quad.vert.spv");
+    void createGraphicsPipeline(std::string_view directory,
+                                NativePipeline& pipeline,
+                                bool withDepth,
+                                bool withNormals = false) {
+        const std::array types{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+        const auto attachmentCount = 1 + std::uint32_t(withDepth) + std::uint32_t(withNormals);
+        createNativeLayout(context,
+                           pipeline,
+                           std::span(types).first(attachmentCount),
+                           VK_SHADER_STAGE_VERTEX_BIT,
+                           sizeof(GraphicsParameters));
+        std::string stem = "native_quad";
+        if (withDepth) {
+            stem += "_depth";
+        }
+        if (withNormals) {
+            stem += "_normals";
+        }
+        const auto vertex = loadNativeShader(context, directory, stem + ".vert.spv");
         VkShaderModule fragment = VK_NULL_HANDLE;
         try {
-            fragment = loadNativeShader(context, directory, "native_quad.frag.spv");
-            createGraphicsStages(vertex, fragment);
+            fragment = loadNativeShader(context, directory, stem + ".frag.spv");
+            createGraphicsStages(vertex, fragment, pipeline, withDepth, withNormals);
         } catch (...) {
             vkDestroyShaderModule(context.device, vertex, nullptr);
             vkDestroyShaderModule(context.device, fragment, nullptr);
@@ -264,7 +307,11 @@ struct StaticGsRenderer::Impl {
         vkDestroyShaderModule(context.device, fragment, nullptr);
     }
 
-    void createGraphicsStages(VkShaderModule vertex, VkShaderModule fragment) {
+    void createGraphicsStages(VkShaderModule vertex,
+                              VkShaderModule fragment,
+                              NativePipeline& pipeline,
+                              bool withDepth,
+                              bool withNormals) {
         std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
         for (auto& stage : stages) {
             stage =
@@ -292,11 +339,11 @@ struct StaticGsRenderer::Impl {
         auto sampling = vkInfo<VkPipelineMultisampleStateCreateInfo>(
             VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO);
         sampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        const auto attachment = blendState();
+        const std::array attachments{blendState(), blendState(), blendState()};
         auto blending = vkInfo<VkPipelineColorBlendStateCreateInfo>(
             VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO);
-        blending.attachmentCount = 1;
-        blending.pAttachments = &attachment;
+        blending.attachmentCount = 1 + std::uint32_t(withDepth) + std::uint32_t(withNormals);
+        blending.pAttachments = attachments.data();
         const std::array dynamicStates{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         auto dynamic =
             vkInfo<VkPipelineDynamicStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
@@ -312,30 +359,67 @@ struct StaticGsRenderer::Impl {
         info.pMultisampleState = &sampling;
         info.pColorBlendState = &blending;
         info.pDynamicState = &dynamic;
-        info.layout = raster.layout;
-        info.renderPass = renderPass;
-        vkCheck(vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &raster.handle),
-                "vkCreateGraphicsPipelines native");
+        info.layout = pipeline.layout;
+        info.renderPass = targets.pass(withDepth, withNormals);
+        vkCheck(
+            vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline.handle),
+            "vkCreateGraphicsPipelines native");
+    }
+
+    void createComposePipeline(std::string_view directory, NativePipeline& pipeline, bool withFloat) {
+        const std::array types{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+        createNativeCompute(context,
+                            pipeline,
+                            directory,
+                            withFloat ? "native_compose_float.comp.spv" : "native_compose.comp.spv",
+                            std::span(types).first(withFloat ? 5 : 2),
+                            sizeof(ComposeParameters));
     }
 
     void createPipelines(std::string_view directory) {
         createNativeCompute(
-            context, projection, directory, "native_project.comp.spv", 3, sizeof(ProjectParameters));
-        createGraphicsPipeline(directory);
-        const std::array types{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-        createNativeLayout(context, compose, types, VK_SHADER_STAGE_COMPUTE_BIT, 0);
-        const auto shader = loadNativeShader(context, directory, "native_compose.comp.spv");
-        auto info = vkInfo<VkComputePipelineCreateInfo>(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO);
-        info.layout = compose.layout;
-        info.stage =
-            vkInfo<VkPipelineShaderStageCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
-        info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        info.stage.module = shader;
-        info.stage.pName = "main";
-        const auto result =
-            vkCreateComputePipelines(context.device, VK_NULL_HANDLE, 1, &info, nullptr, &compose.handle);
-        vkDestroyShaderModule(context.device, shader, nullptr);
-        vkCheck(result, "vkCreateComputePipelines native compose");
+            context, projection, directory, "native_project.comp.spv", 4, sizeof(ProjectParameters));
+        createNativeCompute(
+            context, shading, directory, "native_shading.comp.spv", 1, sizeof(ProjectParameters));
+        createGraphicsPipeline(directory, raster, false);
+        createGraphicsPipeline(directory, rasterDepth, true);
+        createComposePipeline(directory, compose, false);
+        createComposePipeline(directory, composeFloat, true);
+    }
+
+    void ensureNormals() {
+        if (!targets.hasNormals()) {
+            destroyBuffer(allocator, projectedNormals);
+            return;
+        }
+        reserveBuffer(allocator,
+                      projectedNormals,
+                      targetCount * normalBytes,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                      NativeHostAccess::None,
+                      counts);
+        if (projectionNormals.handle) {
+            return;
+        }
+        try {
+            createNativeCompute(context,
+                                projectionNormals,
+                                shaderDirectory,
+                                "native_project_normals.comp.spv",
+                                5,
+                                sizeof(ProjectParameters));
+            createGraphicsPipeline(shaderDirectory, rasterNormals, false, true);
+            createGraphicsPipeline(shaderDirectory, rasterDepthNormals, true, true);
+        } catch (...) {
+            for (auto* pipeline : {&projectionNormals, &rasterNormals, &rasterDepthNormals}) {
+                destroyPipeline(context, *pipeline);
+            }
+            throw;
+        }
     }
 
     void createQueries() {
@@ -358,61 +442,62 @@ struct StaticGsRenderer::Impl {
         vkCheck(vkCreateQueryPool(context.device, &info, nullptr, &queries), "vkCreateQueryPool native");
     }
 
-    void ensureRasterTarget(const FrameState& frame, FrameReport& report) {
-        if (rasterWidth == frame.width && rasterHeight == frame.height) {
+    void createStatisticsQueries() {
+        if (!context.pipelineStatisticsEnabled) {
             return;
         }
-        destroyRasterTarget();
-        auto info = vkInfo<VkImageCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
-        info.imageType = VK_IMAGE_TYPE_2D;
-        info.format = accumulationFormat;
-        info.extent = {frame.width, frame.height, 1};
-        info.mipLevels = 1;
-        info.arrayLayers = 1;
-        info.samples = VK_SAMPLE_COUNT_1_BIT;
-        info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        VmaAllocationCreateInfo memory{};
-        memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-        vkCheck(vmaCreateImage(allocator, &info, &memory, &rasterImage, &rasterMemory, nullptr),
-                "vmaCreateImage native accumulation");
-        ++report.backend.imageAllocations;
-        auto view = vkInfo<VkImageViewCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
-        view.image = rasterImage;
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.format = accumulationFormat;
-        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCheck(vkCreateImageView(context.device, &view, nullptr, &rasterView), "vkCreateImageView native");
-        auto target = vkInfo<VkFramebufferCreateInfo>(VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO);
-        target.renderPass = renderPass;
-        target.attachmentCount = 1;
-        target.pAttachments = &rasterView;
-        target.width = frame.width;
-        target.height = frame.height;
-        target.layers = 1;
-        vkCheck(vkCreateFramebuffer(context.device, &target, nullptr, &framebuffer),
-                "vkCreateFramebuffer native");
-        rasterWidth = frame.width;
-        rasterHeight = frame.height;
+        auto info = vkInfo<VkQueryPoolCreateInfo>(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
+        info.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+        info.queryCount = 1;
+        info.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
+        vkCheck(vkCreateQueryPool(context.device, &info, nullptr, &statisticsQueries),
+                "vkCreateQueryPool fragment statistics");
     }
 
-    bool ensureScene(const FrameState& frame) {
+    std::size_t positionStride() const { return positionBytes * (temporal.active() ? 2 : 1); }
+
+    std::size_t harmonicStride() const {
+        const auto coefficients = (scene->shRestCoefficients() + 1) * 3;
+        return (coefficients * (temporal.degree + 1) + std::size_t(temporal.active())) * sizeof(float);
+    }
+
+    bool ensureScene(const FrameState& frame, const GaussianTemporalView& nextTemporal) {
+        if (scene != frame.scene) {
+            validateScene(*frame.scene);
+        }
         const auto nextCount = frame.renderSettings.budgetedCount(frame.scene->count());
-        const bool changed = scene != frame.scene || targetCount != nextCount;
+        const bool changed =
+            scene != frame.scene || targetCount != nextCount || temporal.active() != nextTemporal.active() ||
+            temporal.degree != nextTemporal.degree || temporal.period != nextTemporal.period ||
+            temporal.times.data() != nextTemporal.times.data() ||
+            temporal.variances.data() != nextTemporal.variances.data() ||
+            temporal.velocities.data() != nextTemporal.velocities.data() ||
+            temporal.harmonics.data() != nextTemporal.harmonics.data();
+        const bool timeChanged = temporal.time != nextTemporal.time;
         if (changed) {
+            rejectedTile.reset();
             scene = frame.scene;
             targetCount = nextCount;
             uploadedCount = 0;
-            capture.reset();
             ++uploads;
         }
-        return changed;
+        temporal = nextTemporal;
+        if (changed || timeChanged) {
+            capture.reset();
+        }
+        return changed || timeChanged;
     }
 
     void ensureBuffers() {
         reserveBuffer(allocator,
+                      projectionSettings,
+                      sizeof(ProjectionSettings),
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      NativeHostAccess::None,
+                      counts);
+        reserveBuffer(allocator,
                       positions,
-                      targetCount * positionBytes,
+                      targetCount * positionStride(),
                       modelBufferUsage,
                       NativeHostAccess::None,
                       counts);
@@ -422,15 +507,23 @@ struct StaticGsRenderer::Impl {
                       modelBufferUsage,
                       NativeHostAccess::None,
                       counts);
-        const auto shBytes = (scene->shRestCoefficients() + 1) * 3 * sizeof(float);
-        reserveBuffer(
-            allocator, harmonics, targetCount * shBytes, modelBufferUsage, NativeHostAccess::None, counts);
+        reserveBuffer(allocator,
+                      harmonics,
+                      targetCount * harmonicStride(),
+                      modelBufferUsage,
+                      NativeHostAccess::None,
+                      counts);
         reserveBuffer(allocator,
                       projected,
                       targetCount * projectedBytes,
                       physicalBufferUsage,
                       NativeHostAccess::None,
                       counts);
+        reserveSortStorage();
+        reserveTelemetryStorage();
+    }
+
+    void reserveSortStorage() {
         reserveBuffer(allocator,
                       keys,
                       targetCount * sizeof(std::uint32_t),
@@ -444,19 +537,29 @@ struct StaticGsRenderer::Impl {
                       NativeHostAccess::None,
                       counts);
         reserveBuffer(allocator,
+                      visibility,
+                      sizeof(NativeVisibilityControl),
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      NativeHostAccess::None,
+                      counts);
+        sorter.reserve(static_cast<std::uint32_t>(targetCount));
+    }
+
+    void reserveTelemetryStorage() {
+        reserveBuffer(allocator,
                       counter,
-                      sizeof(std::uint32_t),
+                      projectionCounterBytes,
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                       NativeHostAccess::None,
                       counts);
         reserveBuffer(allocator,
                       counterReadback,
-                      sizeof(std::uint32_t),
+                      projectionCounterBytes + sizeof(NativeVisibilityControl),
                       VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                       NativeHostAccess::Readback,
                       counts);
-        sorter.reserve(static_cast<std::uint32_t>(targetCount));
     }
 
     void begin() {
@@ -469,49 +572,90 @@ struct StaticGsRenderer::Impl {
         }
     }
 
-    void packUpload(std::size_t end, std::size_t shBytes) {
+    void packPosition(std::byte* output, std::size_t source) const {
+        const std::array<float, 4> position{scene->positions[source * 3],
+                                            scene->positions[source * 3 + 1],
+                                            scene->positions[source * 3 + 2],
+                                            scene->opacityLogits[source]};
+        std::memcpy(output, position.data(), positionBytes);
+        if (temporal.active()) {
+            const std::array<float, 4> motion{temporal.velocities[source * 3],
+                                              temporal.velocities[source * 3 + 1],
+                                              temporal.velocities[source * 3 + 2],
+                                              temporal.times[source]};
+            std::memcpy(output + positionBytes, motion.data(), positionBytes);
+        }
+    }
+
+    void packOrientation(std::byte* output, std::size_t source) const {
+        std::memcpy(output, scene->rotations.data() + source * 4, 4 * sizeof(float));
+        const std::array<float, 4> scale{scene->logScales[source * 3],
+                                         scene->logScales[source * 3 + 1],
+                                         scene->logScales[source * 3 + 2],
+                                         temporal.active() ? temporal.variances[source] : 0};
+        std::memcpy(output + 4 * sizeof(float), scale.data(), 4 * sizeof(float));
+    }
+
+    void packHarmonics(std::byte* output, std::size_t source) const {
+        const auto baseBytes = (scene->shRestCoefficients() + 1) * 3 * sizeof(float);
+        std::memcpy(output, scene->sh0.data() + source * 3, 3 * sizeof(float));
+        if (scene->shRestCoefficients()) {
+            std::memcpy(output + 3 * sizeof(float),
+                        scene->shRest.data() + source * scene->shRestCoefficients() * 3,
+                        baseBytes - 3 * sizeof(float));
+        }
+        if (temporal.active()) {
+            const auto temporalBytes = baseBytes * temporal.degree;
+            if (temporalBytes) {
+                std::memcpy(output + baseBytes,
+                            temporal.harmonics.data() + source * temporalBytes / sizeof(float),
+                            temporalBytes);
+            }
+            const auto phase =
+                float(std::remainder(double(temporal.times[source]), temporal.period) / temporal.period);
+            std::memcpy(output + baseBytes + temporalBytes, &phase, sizeof(phase));
+        }
+    }
+
+    void packUpload(std::size_t end) {
         const auto points = end - uploadedCount;
         auto* bytes = static_cast<std::byte*>(staging.mapped);
         for (std::size_t i = 0; i < points; ++i) {
             const auto source = sampledGaussian(uploadedCount + i, scene->count(), targetCount);
-            const std::array<float, 4> position{scene->positions[source * 3],
-                                                scene->positions[source * 3 + 1],
-                                                scene->positions[source * 3 + 2],
-                                                scene->opacityLogits[source]};
-            std::memcpy(bytes + i * positionBytes, position.data(), positionBytes);
-            auto* orient = bytes + points * positionBytes + i * orientationBytes;
-            std::memcpy(orient, scene->rotations.data() + source * 4, 4 * sizeof(float));
-            const std::array<float, 4> scale{scene->logScales[source * 3],
-                                             scene->logScales[source * 3 + 1],
-                                             scene->logScales[source * 3 + 2],
-                                             0};
-            std::memcpy(orient + 4 * sizeof(float), scale.data(), 4 * sizeof(float));
-            auto* sh = bytes + points * (positionBytes + orientationBytes) + i * shBytes;
-            std::memcpy(sh, scene->sh0.data() + source * 3, 3 * sizeof(float));
-            if (scene->shRestCoefficients()) {
-                std::memcpy(sh + 3 * sizeof(float),
-                            scene->shRest.data() + source * scene->shRestCoefficients() * 3,
-                            shBytes - 3 * sizeof(float));
-            }
+            packPosition(bytes + i * positionStride(), source);
+            packOrientation(bytes + points * positionStride() + i * orientationBytes, source);
+            packHarmonics(bytes + points * (positionStride() + orientationBytes) + i * harmonicStride(),
+                          source);
         }
     }
 
-    void upload(const FrameState& frame) {
+    std::size_t uploadEnd(const FrameState& frame) const {
         const auto batch = frame.renderSettings.uploadGaussiansPerFrame;
-        const auto end = batch ? std::min(targetCount, uploadedCount + batch) : targetCount;
+        return batch ? std::min(targetCount, uploadedCount + batch) : targetCount;
+    }
+
+    void reserveUpload(const FrameState& frame) {
+        const auto points = uploadEnd(frame) - uploadedCount;
+        if (!points) {
+            return;
+        }
+        const auto bytes = points * (positionStride() + orientationBytes + harmonicStride());
+        reserveBuffer(
+            allocator, staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, NativeHostAccess::Upload, counts);
+    }
+
+    void upload(const FrameState& frame) {
+        const auto end = uploadEnd(frame);
         if (end == uploadedCount) {
             return;
         }
         const auto points = end - uploadedCount;
-        const auto shBytes = (scene->shRestCoefficients() + 1) * 3 * sizeof(float);
-        const auto bytes = points * (positionBytes + orientationBytes + shBytes);
-        reserveBuffer(
-            allocator, staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, NativeHostAccess::Upload, counts);
-        packUpload(end, shBytes);
+        const auto bytes = points * (positionStride() + orientationBytes + harmonicStride());
+        packUpload(end);
         vkCheck(vmaFlushAllocation(allocator, staging.allocation, 0, bytes),
                 "vmaFlushAllocation native upload");
         const std::array<const NativeBuffer*, 3> targets{&positions, &orientations, &harmonics};
-        const std::array strides{positionBytes, orientationBytes, shBytes};
+        const std::array strides{positionStride(), orientationBytes, harmonicStride()};
         std::size_t offset = 0;
         for (std::size_t i = 0; i < targets.size(); ++i) {
             const VkBufferCopy copy{offset, uploadedCount * strides[i], points * strides[i]};
@@ -521,8 +665,7 @@ struct StaticGsRenderer::Impl {
         uploadedCount = end;
     }
 
-    ProjectParameters parameters(const FrameState& frame, bool sample) const {
-        const auto camera = cameraView(frame.camera, frame.width, frame.height);
+    ProjectParameters parameters(const FrameState& frame, const CameraView& camera, bool diagnostics) const {
         ProjectParameters result{};
         std::copy(camera.right.begin(), camera.right.end(), result.right.begin());
         std::copy(camera.down.begin(), camera.down.end(), result.down.begin());
@@ -533,10 +676,18 @@ struct StaticGsRenderer::Impl {
         result.right[3] = scale ? std::log(settings.attributeMinimum) : settings.attributeMinimum;
         result.down[3] = scale ? std::log(settings.attributeMaximum) : settings.attributeMaximum;
         result.viewport = {float(frame.width), float(frame.height), camera.focalPixels, 0};
+        if (temporal.active()) {
+            result.forward[3] = float(temporal.time);
+            result.eye[3] = float(temporal.time - double(result.forward[3]));
+            result.viewport[3] = float(std::remainder(temporal.time, temporal.period) / temporal.period);
+        }
         result.controls = {static_cast<std::uint32_t>(uploadedCount),
                            scene->shDegree,
                            static_cast<std::uint32_t>(settings.attributeView),
-                           std::uint32_t(scene->antialiased) | (std::uint32_t(sample) << 1)};
+                           std::uint32_t(scene->antialiased) | (std::uint32_t(diagnostics) << 1) |
+                               (std::uint32_t(temporal.active()) << 2) | (std::uint32_t(diagnostics) << 3) |
+                               (std::uint32_t(frame.renderSettings.separateShading) << 4) |
+                               (temporal.degree << 8)};
         result.addresses = {bufferAddress(context, positions),
                             bufferAddress(context, orientations),
                             bufferAddress(context, harmonics),
@@ -550,20 +701,36 @@ struct StaticGsRenderer::Impl {
         }
     }
 
-    void project(const FrameState& frame, bool sample) {
-        if (sample) {
-            vkCmdFillBuffer(command, counter.handle, 0, sizeof(std::uint32_t), 0);
+    void project(const FrameState& frame, const CameraView& camera, bool diagnostics) {
+        const ProjectionSettings settings{camera.intrinsics,
+                                          {camera.depthRange[0],
+                                           camera.depthRange[1],
+                                           float(camera.projection == CameraProjection::Orthographic),
+                                           0}};
+        stamp(0);
+        vkCmdUpdateBuffer(command, projectionSettings.handle, 0, sizeof(settings), &settings);
+        if (diagnostics) {
+            vkCmdFillBuffer(command, counter.handle, 0, projectionCounterBytes, 0);
         }
         nativeMemoryBarrier(command,
                             VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_ACCESS_TRANSFER_WRITE_BIT,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        stamp(0);
-        bindNativeBuffers(command, projection, VK_PIPELINE_BIND_POINT_COMPUTE, {&keys, &indices, &counter});
-        const auto settings = parameters(frame, sample);
-        vkCmdPushConstants(
-            command, projection.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(settings), &settings);
+        const auto* normalBuffer = targets.hasNormals() ? &projectedNormals : nullptr;
+        const auto& pipeline = normalBuffer ? projectionNormals : projection;
+        bindNativeBuffers(command,
+                          pipeline,
+                          VK_PIPELINE_BIND_POINT_COMPUTE,
+                          {&keys, &indices, &counter, &projectionSettings},
+                          normalBuffer);
+        const auto projectParameters = parameters(frame, camera, diagnostics);
+        vkCmdPushConstants(command,
+                           pipeline.layout,
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0,
+                           sizeof(projectParameters),
+                           &projectParameters);
         vkCmdDispatch(command,
                       (static_cast<std::uint32_t>(uploadedCount) + projectGroupSize - 1) / projectGroupSize,
                       1,
@@ -576,110 +743,242 @@ struct StaticGsRenderer::Impl {
         stamp(1);
     }
 
-    void rasterize(const FrameState& frame) {
+    void shade(const FrameState& frame, const CameraView& camera, bool diagnostics) {
+        if (!frame.renderSettings.separateShading ||
+            frame.renderSettings.attributeView != AttributeView::Normal) {
+            return;
+        }
+        bindNativeBuffers(command, shading, VK_PIPELINE_BIND_POINT_COMPUTE, {&projectionSettings});
+        const auto settings = parameters(frame, camera, diagnostics);
+        vkCmdPushConstants(
+            command, shading.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(settings), &settings);
+        vkCmdDispatch(command,
+                      (static_cast<std::uint32_t>(uploadedCount) + projectGroupSize - 1) / projectGroupSize,
+                      1,
+                      1);
         nativeMemoryBarrier(command,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             VK_ACCESS_SHADER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-                            VK_ACCESS_SHADER_READ_BIT);
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    }
+
+    void rasterize(const FrameState& frame, bool statistics) {
+        const bool collect = statistics && statisticsQueries;
+        if (collect) {
+            vkCmdResetQueryPool(command, statisticsQueries, 0, 1);
+            vkCmdBeginQuery(command, statisticsQueries, 0, 0);
+        }
+        nativeMemoryBarrier(command,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+        const auto* normalBuffer = targets.hasNormals() ? &projectedNormals : nullptr;
+        const auto& pipeline = normalBuffer ? (targets.hasDepth() ? rasterDepthNormals : rasterNormals)
+                                            : (targets.hasDepth() ? rasterDepth : raster);
         const VkClearValue clear{{{0, 0, 0, 1}}};
+        const std::array clears{clear, clear, clear};
         auto pass = vkInfo<VkRenderPassBeginInfo>(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
-        pass.renderPass = renderPass;
-        pass.framebuffer = framebuffer;
+        pass.renderPass = targets.pass(targets.hasDepth(), targets.hasNormals());
+        pass.framebuffer = targets.framebuffer();
         pass.renderArea.extent = {frame.width, frame.height};
-        pass.clearValueCount = 1;
-        pass.pClearValues = &clear;
+        pass.clearValueCount = 1 + std::uint32_t(targets.hasDepth()) + std::uint32_t(targets.hasNormals());
+        pass.pClearValues = clears.data();
         vkCmdBeginRenderPass(command, &pass, VK_SUBPASS_CONTENTS_INLINE);
-        bindNativeBuffers(command, raster, VK_PIPELINE_BIND_POINT_GRAPHICS, {&indices});
+        if (targets.hasDepth()) {
+            bindNativeBuffers(
+                command, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS, {&indices, &keys}, normalBuffer);
+        } else {
+            bindNativeBuffers(command, pipeline, VK_PIPELINE_BIND_POINT_GRAPHICS, {&indices}, normalBuffer);
+        }
         const GraphicsParameters settings{bufferAddress(context, projected),
                                           {float(frame.width), float(frame.height)}};
         vkCmdPushConstants(
-            command, raster.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(settings), &settings);
+            command, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(settings), &settings);
         const VkViewport viewport{0, 0, float(frame.width), float(frame.height), 0, 1};
         const VkRect2D scissor{{0, 0}, {frame.width, frame.height}};
         vkCmdSetViewport(command, 0, 1, &viewport);
         vkCmdSetScissor(command, 0, 1, &scissor);
-        vkCmdDraw(command, quadVertices, static_cast<std::uint32_t>(uploadedCount), 0, 0);
+        if (tiler) {
+            vkCmdDrawIndirect(command,
+                              tiler->fallbackArguments().handle,
+                              NativeTileRaster::fallbackOffset,
+                              1,
+                              sizeof(VkDrawIndirectCommand));
+        } else {
+            vkCmdDrawIndirect(command,
+                              visibility.handle,
+                              offsetof(NativeVisibilityControl, draw),
+                              1,
+                              sizeof(VkDrawIndirectCommand));
+        }
         vkCmdEndRenderPass(command);
-        stamp(3);
+        if (collect) {
+            vkCmdEndQuery(command, statisticsQueries, 0);
+        }
+        if (tiler) {
+            tiler->recordRaster(command, frame, rasterInput(), targets, statistics);
+        }
+        stamp(5);
     }
 
-    void composeImage(const FrameState& frame, VkImage image, VkImageView view, bool initialized) {
-        auto toWritable =
+    void makeWritable(VkImage image, bool initialized) {
+        auto barrier =
             imageBarrier(image,
                          initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
                          VK_IMAGE_LAYOUT_GENERAL);
-        toWritable.srcAccessMask = initialized ? VK_ACCESS_SHADER_READ_BIT : 0;
-        toWritable.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        transition(command,
-                   toWritable,
-                   initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-        const std::array<VkDescriptorImageInfo, 2> infos{
-            {{sampler, rasterView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-             {VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL}}};
-        std::array<VkWriteDescriptorSet, 2> writes{};
-        for (std::uint32_t i = 0; i < writes.size(); ++i) {
+        barrier.srcAccessMask = initialized ? VK_ACCESS_SHADER_READ_BIT : 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        nativeImageBarrier(command,
+                           initialized ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                       : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           barrier);
+    }
+
+    void bindComposeImages(const NativePipeline& pipeline, VkImageView display, bool withFloat) {
+        const auto& fallback = targets.colorAlpha.resource.image ? targets.colorAlpha : targets.depth;
+        const auto& color = targets.colorAlpha.resource.image ? targets.colorAlpha : fallback;
+        const auto& depth = targets.depth.resource.image ? targets.depth : fallback;
+        const auto depthSource =
+            targets.hasDepth() ? targets.depthAccum.resource.view : targets.colorAccum.resource.view;
+        const std::array<VkDescriptorImageInfo, 5> infos{
+            {{sampler, targets.colorAccum.resource.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+             {VK_NULL_HANDLE, display, VK_IMAGE_LAYOUT_GENERAL},
+             {VK_NULL_HANDLE, color.resource.view, VK_IMAGE_LAYOUT_GENERAL},
+             {sampler, depthSource, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+             {VK_NULL_HANDLE, depth.resource.view, VK_IMAGE_LAYOUT_GENERAL}}};
+        std::array<VkWriteDescriptorSet, 5> writes{};
+        const std::uint32_t count = withFloat ? 5 : 2;
+        for (std::uint32_t i = 0; i < count; ++i) {
             writes[i] = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
             writes[i].dstBinding = i;
             writes[i].descriptorCount = 1;
-            writes[i].descriptorType =
-                i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].descriptorType = (i == 0 || i == 3) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                          : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             writes[i].pImageInfo = &infos[i];
         }
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, compose.handle);
-        vkCmdPushDescriptorSetKHR(command,
-                                  VK_PIPELINE_BIND_POINT_COMPUTE,
-                                  compose.layout,
-                                  0,
-                                  static_cast<std::uint32_t>(writes.size()),
-                                  writes.data());
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
+        vkCmdPushDescriptorSetKHR(
+            command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, count, writes.data());
+    }
+
+    void composeImage(const FrameState& frame, VkImage image, VkImageView view, bool initialized) {
+        makeWritable(image, initialized);
+        RenderOutput outputs = RenderOutput::Display;
+        for (auto* target : {&targets.colorAlpha, &targets.depth}) {
+            if (target->resource.image) {
+                makeWritable(target->resource.image, target->hasContent);
+                outputs = outputs |
+                          (target == &targets.depth ? RenderOutput::Depth : RenderOutput::FloatColorAlpha);
+            }
+        }
+        const bool withFloat = outputs != RenderOutput::Display;
+        const auto& pipeline = withFloat ? composeFloat : compose;
+        bindComposeImages(pipeline, view, withFloat);
+        ComposeParameters settings{};
+        std::copy(frame.renderSettings.background.begin(),
+                  frame.renderSettings.background.end(),
+                  settings.background.begin());
+        settings.controls[0] = std::uint32_t(outputs);
+        vkCmdPushConstants(
+            command, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(settings), &settings);
         vkCmdDispatch(command,
                       (frame.width + composeGroupSize - 1) / composeGroupSize,
                       (frame.height + composeGroupSize - 1) / composeGroupSize,
                       1);
-        stamp(4);
+        stamp(6);
     }
 
-    void recordCapture(const FrameState& frame, VkImage image) {
-        auto toCopy = imageBarrier(image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        transition(command, toCopy, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkBufferImageCopy copy{};
-        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.imageExtent = {frame.width, frame.height, 1};
-        vkCmdCopyImageToBuffer(
-            command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pixelReadback.handle, 1, &copy);
+    VkImage captureImage(RenderOutput output, VkImage display) const {
+        if (output == RenderOutput::Display) {
+            return display;
+        }
+        if (output == RenderOutput::Normals) {
+            return targets.normals.resource.image;
+        }
+        return output == RenderOutput::Depth ? targets.depth.resource.image
+                                             : targets.colorAlpha.resource.image;
     }
 
-    void finishRecording(VkImage image, bool sampled, bool captured) {
+    void recordCapture(const FrameState& frame, VkImage display, const NativeCapturePlan& plan) {
+        for (std::size_t i = 0; i < plan.count; ++i) {
+            const auto& plane = plan.planes[i];
+            const auto image = captureImage(plane.output, display);
+            const bool normals = plane.output == RenderOutput::Normals;
+            auto barrier =
+                imageBarrier(image,
+                             normals ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            barrier.srcAccessMask =
+                VK_ACCESS_SHADER_WRITE_BIT | (normals ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0);
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            nativeImageBarrier(command,
+                               normals ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                                       : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               barrier);
+            VkBufferImageCopy copy{};
+            copy.bufferOffset = plane.offset;
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {frame.width, frame.height, 1};
+            vkCmdCopyImageToBuffer(
+                command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pixelReadback.handle, 1, &copy);
+        }
+    }
+
+    void makeReadable(VkImage image, bool captured) {
+        auto barrier = imageBarrier(image,
+                                    captured ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        barrier.srcAccessMask = captured ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        nativeImageBarrier(command,
+                           captured ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           barrier);
+    }
+
+    void finishRecording(VkImage image, bool sampled, RenderOutput captured) {
         if (sampled) {
             nativeMemoryBarrier(command,
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 VK_ACCESS_SHADER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                                 VK_ACCESS_TRANSFER_READ_BIT);
-            const VkBufferCopy copy{0, 0, sizeof(std::uint32_t)};
-            vkCmdCopyBuffer(command, counter.handle, counterReadback.handle, 1, &copy);
+            if (std::uint32_t(captured)) {
+                const VkBufferCopy copy{0, 0, projectionCounterBytes};
+                vkCmdCopyBuffer(command, counter.handle, counterReadback.handle, 1, &copy);
+            }
+            const VkBufferCopy visibilityCopy{0, projectionCounterBytes, sizeof(NativeVisibilityControl)};
+            vkCmdCopyBuffer(command, visibility.handle, counterReadback.handle, 1, &visibilityCopy);
+            if (tiler) {
+                tiler->recordTelemetry(command);
+            }
         }
-        if (sampled || captured) {
+        if (sampled || std::uint32_t(captured)) {
             nativeMemoryBarrier(command,
                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                                 VK_ACCESS_TRANSFER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_HOST_BIT,
                                 VK_ACCESS_HOST_READ_BIT);
         }
-        auto readable =
-            imageBarrier(image,
-                         captured ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        readable.srcAccessMask = captured ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_SHADER_WRITE_BIT;
-        readable.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        transition(command,
-                   readable,
-                   captured ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        makeReadable(image, hasOutput(captured, RenderOutput::Display));
+        for (auto* target : {&targets.colorAlpha, &targets.depth}) {
+            if (!target->resource.image) {
+                continue;
+            }
+            const auto plane = target == &targets.depth ? RenderOutput::Depth : RenderOutput::FloatColorAlpha;
+            makeReadable(target->resource.image, hasOutput(captured, plane));
+            target->resource.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        if (targets.hasNormals()) {
+            if (hasOutput(captured, RenderOutput::Normals)) {
+                makeReadable(targets.normals.resource.image, true);
+            }
+            targets.normals.resource.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
         vkCheck(vkEndCommandBuffer(command), "vkEndCommandBuffer native");
     }
 
@@ -694,61 +993,127 @@ struct StaticGsRenderer::Impl {
         return milliseconds(start);
     }
 
-    void readTimestamps(FrameStats& frame) {
+    void readTicks(std::uint32_t first, std::span<std::uint64_t> values) {
+        vkCheck(vkGetQueryPoolResults(context.device,
+                                      queries,
+                                      first,
+                                      static_cast<std::uint32_t>(values.size()),
+                                      values.size_bytes(),
+                                      values.data(),
+                                      sizeof(values[0]),
+                                      VK_QUERY_RESULT_64_BIT),
+                "vkGetQueryPoolResults native");
+    }
+
+    void readTileTimings(BackendStats& stats,
+                         const std::array<std::uint64_t, frameTimestampCount>& frame,
+                         bool captured) {
+        if (!tiler || !captured) {
+            return;
+        }
+        std::array<std::uint64_t, tileTimestampCount> phases{};
+        readTicks(frameTimestampCount, phases);
+        const std::array ticks{frame[3], phases[0], phases[1], phases[2], phases[3], frame[4]};
+        const auto interval = [&](std::size_t i) {
+            return double((ticks[i + 1] - ticks[i]) & timestampMask) * timestampPeriod / 1'000'000.;
+        };
+        stats.tileStageTimings =
+            TileStageTimings{interval(0), interval(1), interval(2), interval(3), interval(4)};
+    }
+
+    void readTimestamps(const FrameState& state, FrameReport& report, bool captured) {
+        auto& frame = report.frame;
+        report.backend.tileStageTimings.reset();
         frame.projectionGpuMs.reset();
+        frame.shadingGpuMs.reset();
         frame.sortingGpuMs.reset();
+        frame.binningGpuMs.reset();
         frame.rasterGpuMs.reset();
         frame.composeGpuMs.reset();
         frame.gpuRenderMs.reset();
         if (!queries) {
             return;
         }
-        std::array<std::uint64_t, timestampCount> values{};
-        vkCheck(vkGetQueryPoolResults(context.device,
-                                      queries,
-                                      0,
-                                      timestampCount,
-                                      sizeof(values),
-                                      values.data(),
-                                      sizeof(values[0]),
-                                      VK_QUERY_RESULT_64_BIT),
-                "vkGetQueryPoolResults native");
+        std::array<std::uint64_t, frameTimestampCount> values{};
+        readTicks(0, values);
+        readTileTimings(report.backend, values, captured);
         const auto interval = [&](std::size_t i) {
             return double((values[i + 1] - values[i]) & timestampMask) * timestampPeriod / 1'000'000.;
         };
         frame.projectionGpuMs = interval(0);
-        frame.sortingGpuMs = interval(1);
-        frame.rasterGpuMs = interval(2);
-        frame.composeGpuMs = interval(3);
-        frame.gpuRenderMs = *frame.projectionGpuMs + *frame.sortingGpuMs + *frame.rasterGpuMs;
+        if (state.renderSettings.separateShading &&
+            state.renderSettings.attributeView == AttributeView::Normal) {
+            frame.shadingGpuMs = interval(1);
+        }
+        frame.sortingGpuMs = interval(2);
+        if (tiler) {
+            frame.binningGpuMs = interval(3);
+        }
+        frame.rasterGpuMs = interval(4);
+        frame.composeGpuMs = interval(5);
+        frame.gpuRenderMs = interval(0) + interval(1) + interval(2) + interval(3) + interval(4);
     }
 
-    void readResults(const FrameState& frame, FrameReport& report, bool sample, bool captured) {
+    void readProjectionCounters(BackendStats& stats, bool diagnostics) {
+        vkCheck(vmaInvalidateAllocation(allocator, counterReadback.allocation, 0, counterReadback.capacity),
+                "vmaInvalidateAllocation native counters");
+        NativeVisibilityControl compacted{};
+        std::memcpy(&compacted,
+                    static_cast<const std::byte*>(counterReadback.mapped) + projectionCounterBytes,
+                    sizeof(compacted));
+        stats.visibleGaussians = compacted.sort.count;
+        stats.sortedGaussians = compacted.sort.count;
+        stats.projectionDiagnostics.reset();
+        if (diagnostics) {
+            std::array<std::uint32_t, projectionCounterWords> values{};
+            std::memcpy(values.data(), counterReadback.mapped, projectionCounterBytes);
+            stats.independentlyProjectedGaussians = values[0];
+            stats.projectionDiagnostics = decodeDiagnostics(values);
+        }
+    }
+
+    void readStatistics(BackendStats& stats, bool captured) {
+        stats.fragmentShaderInvocations.reset();
+        if (!captured || !statisticsQueries) {
+            return;
+        }
+        std::uint64_t invocations = 0;
+        vkCheck(vkGetQueryPoolResults(context.device,
+                                      statisticsQueries,
+                                      0,
+                                      1,
+                                      sizeof(invocations),
+                                      &invocations,
+                                      sizeof(invocations),
+                                      VK_QUERY_RESULT_64_BIT),
+                "read fragment statistics");
+        stats.fragmentShaderInvocations = invocations;
+    }
+
+    void readResults(const FrameState& frame,
+                     FrameReport& report,
+                     bool sample,
+                     const NativeCapturePlan& plan) {
         const auto start = Clock::now();
-        readTimestamps(report.frame);
+        readTimestamps(frame, report, plan.count != 0);
+        readStatistics(report.backend, plan.count != 0);
+        report.backend.independentlyProjectedGaussians.reset();
+        report.backend.projectionDiagnostics.reset();
         if (sample) {
-            vkCheck(vmaInvalidateAllocation(allocator, counterReadback.allocation, 0, sizeof(std::uint32_t)),
-                    "vmaInvalidateAllocation native counter");
-            std::uint32_t visible = 0;
-            std::memcpy(&visible, counterReadback.mapped, sizeof(visible));
-            report.backend.visibleGaussians = visible;
+            readProjectionCounters(report.backend, plan.count != 0);
+            if (tiler) {
+                tiler->readTelemetry(plan.count != 0);
+            }
             report.backend.telemetryFrameIndex = report.frame.frameIndex + 1;
             lastCounterSample = Clock::now();
         }
         report.backend.telemetryAgeMs = milliseconds(lastCounterSample);
         report.frame.queryReadbackCpuMs = milliseconds(start);
-        if (captured) {
-            const auto bytes = std::size_t(frame.width) * frame.height * rgbaPixelBytes;
-            vkCheck(vmaInvalidateAllocation(allocator, pixelReadback.allocation, 0, bytes),
+        if (plan.count) {
+            vkCheck(vmaInvalidateAllocation(allocator, pixelReadback.allocation, 0, plan.bytes),
                     "vmaInvalidateAllocation native pixels");
-            auto result = std::make_shared<FrameCapture>();
-            result->requestId = frame.captureRequestId;
-            result->width = frame.width;
-            result->height = frame.height;
-            result->rgba.resize(bytes);
-            std::memcpy(result->rgba.data(), pixelReadback.mapped, bytes);
-            capture = std::move(result);
-            ++pixelReadbacks;
+            capture = nativeReadCapture(frame, plan, pixelReadback.mapped);
+            pixelReadbacks += plan.count;
         }
     }
 
@@ -764,68 +1129,225 @@ struct StaticGsRenderer::Impl {
         frame.capture = capture;
         frame.temporalEvaluationCpuMs.reset();
         auto& stats = report.backend;
-        stats.rasterizer = "native-vulkan-ewa-quads";
+        stats.tileAllocationFallback = rejectedTile.has_value();
+        stats.rasterizer = tiler ? "native-vulkan-hybrid-tiles" : "native-vulkan-ewa-quads";
+        if (tiler) {
+            tiler->fillStats(stats);
+            stats.tileBinningWidth = state.renderSettings.tileBinningWidth;
+        } else {
+            stats.tilePairsReserved.reset();
+            stats.cooperativeGaussians.reset();
+            stats.tilePairsDemandLowerBound.reset();
+            stats.tilePairOverflow.reset();
+            stats.tiledRasterization.reset();
+            stats.tilePairCapacity = 0;
+            stats.tileBinningWidth = 0;
+            stats.tileDiagnostics.reset();
+        }
         stats.gsBufferAllocations = counts.allocations;
         stats.gsBufferReuses = counts.reuses;
         stats.gsGrowths = counts.growths;
         stats.modelBytes = positions.capacity + orientations.capacity + harmonics.capacity + staging.capacity;
-        stats.preprocessingBytes = projected.capacity;
-        stats.sortingBytes = keys.capacity + indices.capacity + sorter.bytes();
-        stats.pixelBytes = std::size_t(rasterWidth) * rasterHeight * accumulationPixelBytes;
-        stats.telemetryBytes = counter.capacity + counterReadback.capacity + pixelReadback.capacity;
+        stats.preprocessingBytes =
+            projected.capacity + projectedNormals.capacity + projectionSettings.capacity;
+        stats.sortingBytes = keys.capacity + indices.capacity + visibility.capacity + sorter.bytes() +
+                             (tiler ? tiler->workspaceBytes() : 0);
+        stats.pixelBytes = targets.bytes();
+        stats.telemetryBytes = counter.capacity + counterReadback.capacity + pixelReadback.capacity +
+                               (tiler ? tiler->telemetryBytes() : 0);
         stats.gsReservedBytes = stats.modelBytes + stats.preprocessingBytes + stats.sortingBytes +
                                 stats.pixelBytes + stats.telemetryBytes;
     }
 
+    NativeRasterInput rasterInput() const {
+        return {projected,
+                keys,
+                indices,
+                static_cast<std::uint32_t>(uploadedCount),
+                &visibility,
+                targets.hasNormals() ? &projectedNormals : nullptr};
+    }
+
+    bool ensureTiler(const FrameState& frame) {
+        const auto mode = frame.renderSettings.rasterMode;
+        const bool wanted = mode == RasterMode::TiledCompute;
+        if (!wanted) {
+            tiler.reset();
+            rejectedTile.reset();
+            return false;
+        }
+        const std::array configuration{targetCount,
+                                       std::size_t(frame.width),
+                                       std::size_t(frame.height),
+                                       std::size_t(frame.renderSettings.tilePairCapacity),
+                                       targets.bytes() + projectedNormals.capacity};
+        if (rejectedTile == configuration) {
+            return false;
+        }
+        const bool created = !tiler;
+        try {
+            if (created) {
+                tiler = std::make_unique<NativeTileRaster>(context, allocator, counts, shaderDirectory);
+            }
+            tiler->reserve(frame, targetCount, targets.hasNormals());
+        } catch (const VulkanError& error) {
+            if (!capacityError(error)) {
+                throw;
+            }
+            tiler.reset();
+            rejectedTile = configuration;
+            return false;
+        }
+        return created;
+    }
+
+    void reserveCapture(const FrameState& frame, const NativeCapturePlan& plan) {
+        if (!plan.count) {
+            return;
+        }
+        if (pixelReadback.capacity > frame.captureBudgetBytes) {
+            destroyBuffer(allocator, pixelReadback);
+        }
+        reserveBuffer(allocator,
+                      pixelReadback,
+                      plan.bytes,
+                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      NativeHostAccess::Readback,
+                      counts);
+    }
+
+    void reserveMandatoryStorage(const FrameState& frame,
+                                 const NativeCapturePlan& capturePlan,
+                                 FrameReport& report) {
+        ensureBuffers();
+        targets.ensure(frame,
+                       frame.renderSettings.outputs |
+                           (capturePlan.count ? frame.captureOutputs : RenderOutput(0)),
+                       report);
+        ensureNormals();
+        reserveUpload(frame);
+        reserveCapture(frame, capturePlan);
+    }
+
+    void reserveFrameStorage(const FrameState& frame,
+                             const NativeCapturePlan& capturePlan,
+                             FrameReport& report) {
+        try {
+            reserveMandatoryStorage(frame, capturePlan, report);
+        } catch (const VulkanError& error) {
+            if (!tiler || !capacityError(error)) {
+                throw;
+            }
+            // A retained optional tile pool must not starve a larger mandatory model or upload.
+            tiler.reset();
+            reserveMandatoryStorage(frame, capturePlan, report);
+        }
+    }
+
+    PreparedFrame prepareFrame(const FrameState& frame,
+                               const GaussianTemporalView& nextTemporal,
+                               FrameReport& report) {
+        validateSettings(frame.renderSettings);
+        PreparedFrame prepared{};
+        prepared.camera = cameraView(frame.camera, frame.width, frame.height);
+        const bool changed = ensureScene(frame, nextTemporal);
+        const bool pending =
+            frame.captureRequestId && (!capture || capture->requestId != frame.captureRequestId ||
+                                       capture->outputs != frame.captureOutputs);
+        if (pending) {
+            prepared.capture = nativeCapturePlan(frame);
+        }
+        const bool complete = uploadEnd(frame) == targetCount;
+        if (!complete) {
+            prepared.capture = {};
+        }
+        prepared.sample = changed || pending || (uploadedCount < targetCount && complete) ||
+                          Clock::now() - lastCounterSample >= counterInterval;
+        reserveFrameStorage(frame, prepared.capture, report);
+        if (ensureTiler(frame)) {
+            prepared.sample = true;
+        }
+        return prepared;
+    }
+
     void render(const FrameState& frame,
+                const GaussianTemporalView& nextTemporal,
                 VkImage image,
                 VkImageView view,
                 bool initialized,
                 FrameReport& report) {
-        const bool changed = ensureScene(frame);
-        ensureRasterTarget(frame, report);
-        ensureBuffers();
-        begin();
-        const bool wasRefining = uploadedCount < targetCount;
-        upload(frame);
-        const bool sample = changed || (wasRefining && uploadedCount == targetCount) ||
-                            Clock::now() - lastCounterSample >= counterInterval;
-        const bool captured = frame.captureRequestId && uploadedCount == targetCount &&
-                              (!capture || capture->requestId != frame.captureRequestId);
-        if (captured) {
-            const auto bytes = std::bit_ceil(std::size_t(frame.width) * frame.height * rgbaPixelBytes);
-            reserveBuffer(allocator,
-                          pixelReadback,
-                          bytes,
-                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                          NativeHostAccess::Readback,
-                          counts);
+        const auto prepared = prepareFrame(frame, nextTemporal, report);
+        const auto previousUpload = uploadedCount;
+        try {
+            begin();
+            upload(frame);
+            project(frame, prepared.camera, prepared.capture.count != 0);
+            shade(frame, prepared.camera, prepared.capture.count != 0);
+            stamp(2);
+            sorter.record(command,
+                          static_cast<std::uint32_t>(uploadedCount),
+                          keys,
+                          indices,
+                          &visibility,
+                          positiveDepthKeyBits);
+            stamp(3);
+            if (tiler) {
+                tiler->recordBinning(
+                    command,
+                    frame,
+                    rasterInput(),
+                    {prepared.capture.count ? queries : VK_NULL_HANDLE, frameTimestampCount});
+            }
+            stamp(4);
+            rasterize(frame, prepared.capture.count != 0);
+            composeImage(frame, image, view, initialized);
+            recordCapture(frame, image, prepared.capture);
+            finishRecording(
+                image, prepared.sample, prepared.capture.count ? frame.captureOutputs : RenderOutput(0));
+            report.frame.backendWaitMs = submitAndWait();
+        } catch (...) {
+            uploadedCount = previousUpload;
+            throw;
         }
-        project(frame, sample);
-        sorter.record(command, static_cast<std::uint32_t>(uploadedCount), keys, indices);
-        stamp(2);
-        rasterize(frame);
-        composeImage(frame, image, view, initialized);
-        if (captured) {
-            recordCapture(frame, image);
+        for (auto* target : {&targets.colorAlpha, &targets.depth, &targets.normals}) {
+            target->hasContent = target->resource.image != VK_NULL_HANDLE;
         }
-        finishRecording(image, sample, captured);
-        report.frame.backendWaitMs = submitAndWait();
-        readResults(frame, report, sample, captured);
+        readResults(frame, report, prepared.sample, prepared.capture);
         fillReport(frame, report);
     }
 };
 
-StaticGsRenderer::StaticGsRenderer(DeviceContext context, VmaAllocator allocator, std::string directory)
+NativeGaussianRenderer::NativeGaussianRenderer(DeviceContext context,
+                                               VmaAllocator allocator,
+                                               std::string directory)
     : impl_(std::make_unique<Impl>(context, allocator, directory)) {}
 
-StaticGsRenderer::~StaticGsRenderer() = default;
+NativeGaussianRenderer::~NativeGaussianRenderer() = default;
 
-void StaticGsRenderer::render(const FrameState& frame,
-                              VkImage image,
-                              VkImageView view,
-                              bool initialized,
-                              FrameReport& report) {
-    impl_->render(frame, image, view, initialized, report);
+VulkanRenderImages NativeGaussianRenderer::outputImages() const { return impl_->targets.outputImages(); }
+
+void NativeGaussianRenderer::render(const FrameState& frame,
+                                    VkImage image,
+                                    VkImageView view,
+                                    bool initialized,
+                                    FrameReport& report) {
+    impl_->render(frame, {}, image, view, initialized, report);
+}
+
+void NativeGaussianRenderer::renderTemporal(const FrameState& frame,
+                                            const GaussianTemporalView& temporal,
+                                            VkImage image,
+                                            VkImageView view,
+                                            bool initialized,
+                                            FrameReport& report) {
+    const auto count = frame.scene ? frame.scene->count() : 0;
+    const auto coefficients = frame.scene ? (frame.scene->shRestCoefficients() + 1) * 3 : 0;
+    if (!count || temporal.times.size() != count || temporal.variances.size() != count ||
+        temporal.velocities.size() != count * 3 ||
+        temporal.harmonics.size() != count * coefficients * temporal.degree || temporal.degree > 2 ||
+        !std::isfinite(temporal.time) || !std::isfinite(temporal.period) || temporal.period <= 0) {
+        throw std::invalid_argument("Invalid Gaussian temporal frame");
+    }
+    impl_->render(frame, temporal, image, view, initialized, report);
 }
 }

@@ -1,0 +1,20 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define PROJECT_SPLATS
+#define CAMERA_BINDING 0
+#include "native_project_parameters.glsl"
+#include "native_sh.glsl"
+layout(local_size_x=256) in;
+void main() {
+    uint index=gl_GlobalInvocationID.x;
+    if (index>=p.controls.x || p.projected.values[index].color.w<0) return;
+    bool temporal=(p.controls.w&4u)!=0;
+    vec3 position=p.positions.values[index*(temporal ? 2 : 1)].xyz;
+    if (temporal) {
+        vec4 motion=p.positions.values[index*2+1];
+        float dt=(p.forward.w-motion.w)+p.eye.w;
+        position+=motion.xyz*dt;
+    }
+    vec3 relative=camera.clipping.z!=0 ? p.forward.xyz : position-p.eye.xyz;
+    p.projected.values[index].color.rgb=color(index,relative);
+}

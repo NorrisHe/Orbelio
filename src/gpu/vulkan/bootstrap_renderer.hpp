@@ -26,6 +26,8 @@ public:
 
     VkImage image() const override { return image_; }
 
+    VulkanRenderImages outputImages() const override;
+
     std::uint32_t width() const override { return width_; }
 
     std::uint32_t height() const override { return height_; }

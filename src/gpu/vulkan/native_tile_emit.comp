@@ -1,0 +1,29 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+#include "native_tile_intersection.glsl"
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Bounds { uvec4 bounds[]; };
+layout(set=0,binding=1,std430) readonly buffer Offsets { uint offsets[]; };
+layout(set=0,binding=2,std430) readonly buffer GroupOffsets { uint groupOffsets[]; };
+layout(set=0,binding=3,std430) readonly buffer ChunkOffsets { uint chunkOffsets[]; };
+layout(set=0,binding=4,std430) writeonly buffer Orders { uint orders[]; };
+layout(set=0,binding=5,std430) writeonly buffer Tiles { uint tiles[]; };
+layout(set=0,binding=6,std430) readonly buffer Counts { uint counts[]; };
+void main() {
+    uint order=gl_GlobalInvocationID.x;
+    if (order>=p.count || counts[order]==0) return;
+    uvec4 encoded=bounds[order];
+    if (encoded.w==0) return;
+    uvec4 rectangle=unpackTileBounds(encoded,p.columns);
+    if (cooperativeBounds(rectangle)) return;
+    ProjectedSplat splat=p.projected.values[encoded.z];
+    uint begin=offsets[order]+groupOffsets[order/256]+chunkOffsets[order/65536];
+    for (uint y=rectangle.y; y<=rectangle.w; ++y) {
+        for (uint x=rectangle.x; x<=rectangle.z; ++x) {
+            if (!intersectsTile(uvec2(x,y),splat)) continue;
+            orders[begin]=order;
+            tiles[begin++]=y*p.columns+x;
+        }
+    }
+}

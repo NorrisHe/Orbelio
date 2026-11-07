@@ -1,0 +1,15 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer Tiles { uint tiles[]; };
+layout(set=0,binding=1,std430) buffer Ranges { uvec2 ranges[]; };
+layout(set=0,binding=2,std430) readonly buffer Control { uint control[]; };
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint count = control[0];
+    if (index>=count) return;
+    uint tile = tiles[index];
+    if (index==0 || tiles[index-1]!=tile) ranges[tile].x = index;
+    if (index+1==count || tiles[index+1]!=tile) ranges[tile].y = index+1;
+}

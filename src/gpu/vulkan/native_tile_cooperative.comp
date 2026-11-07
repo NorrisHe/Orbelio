@@ -1,0 +1,62 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+#include "native_tile_intersection.glsl"
+layout(local_size_x=256) in;
+shared uint prefix[tileGroupSize];
+#ifdef COOPERATIVE_EMIT
+layout(set=0,binding=0,std430) readonly buffer Bounds { uvec4 bounds[]; };
+layout(set=0,binding=1,std430) readonly buffer Offsets { uint offsets[]; };
+layout(set=0,binding=2,std430) readonly buffer GroupOffsets { uint groupOffsets[]; };
+layout(set=0,binding=3,std430) readonly buffer ChunkOffsets { uint chunkOffsets[]; };
+layout(set=0,binding=4,std430) writeonly buffer Orders { uint orders[]; };
+layout(set=0,binding=5,std430) writeonly buffer Tiles { uint tiles[]; };
+layout(set=0,binding=6,std430) readonly buffer Control { uint control[]; };
+#else
+layout(set=0,binding=0,std430) readonly buffer Control { uint control[]; };
+layout(set=0,binding=1,std430) writeonly buffer Counts { uint counts[]; };
+layout(set=0,binding=2,std430) readonly buffer Bounds { uvec4 bounds[]; };
+#endif
+
+void scanCounts(uint count) {
+    uint lane=gl_LocalInvocationIndex;
+    prefix[lane]=count;
+    barrier();
+    for (uint stride=1; stride<tileGroupSize; stride*=2) {
+        uint sum=prefix[lane]+(lane>=stride ? prefix[lane-stride] : 0);
+        barrier();
+        prefix[lane]=sum;
+        barrier();
+    }
+}
+
+void main() {
+    uint id=gl_WorkGroupID.y*cooperativeDispatchColumns+gl_WorkGroupID.x;
+    if (id>=control[cooperativeCountWord]) return;
+    uint at=cooperativeTasksWord+id*2;
+    uvec2 task=uvec2(control[at],control[at+1]);
+    uvec4 rectangle=unpackTileBounds(bounds[task.x],p.columns);
+    uvec2 span=rectangle.zw-rectangle.xy+1;
+    uint area=span.x*span.y;
+    uint lane=gl_LocalInvocationIndex;
+    ProjectedSplat splat=p.projected.values[task.y];
+    uint count=0;
+    for (uint i=lane; i<area; i+=tileGroupSize) {
+        uvec2 tile=rectangle.xy+uvec2(i%span.x,i/span.x);
+        if (intersectsTile(tile,splat)) ++count;
+    }
+    scanCounts(count);
+#ifdef COOPERATIVE_EMIT
+    uint begin=offsets[task.x]+groupOffsets[task.x/256]+chunkOffsets[task.x/65536];
+    begin+=lane==0 ? 0 : prefix[lane-1];
+    // Every lane owns a disjoint slice inside this Gaussian's globally ordered range.
+    for (uint i=lane; i<area; i+=tileGroupSize) {
+        uvec2 tile=rectangle.xy+uvec2(i%span.x,i/span.x);
+        if (!intersectsTile(tile,splat)) continue;
+        orders[begin]=task.x;
+        tiles[begin++]=tile.y*p.columns+tile.x;
+    }
+#else
+    if (lane==0) counts[task.x]=prefix[tileGroupSize-1];
+#endif
+}

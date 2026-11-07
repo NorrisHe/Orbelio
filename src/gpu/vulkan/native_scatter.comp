@@ -1,5 +1,6 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
+#define SORT_CONTROL_BINDING 6
 #include "native_sort_parameters.glsl"
 #include "native_sort_votes.glsl"
 layout(local_size_x = 256) in;
@@ -10,13 +11,15 @@ layout(set=0,binding=3,std430) readonly buffer Offsets { uint offsets[]; };
 layout(set=0,binding=4,std430) writeonly buffer SortedKeys { uint sortedKeys[]; };
 layout(set=0,binding=5,std430) writeonly buffer SortedValues { uint sortedValues[]; };
 void main() {
+    SortParameters p = sortParameters();
+    if (p.count == 0 || gl_WorkGroupID.x >= p.groups) return;
     uint index = gl_GlobalInvocationID.x;
-    bool valid = index < p.count;
-    uint digit = valid ? (keys[index] >> p.shift) & 255u : 0;
-    buildVotes(valid,digit);
+    bool valid = index < p.count && validSortKey(keys[index]);
+    uint digit = valid ? (keys[index] >> p.shift) & (p.activeRadix-1) : 0;
+    buildVotes(valid,digit,p.activeRadix);
     if (!valid) return;
     uint group = gl_WorkGroupID.x;
-    uint destination = prefix[group*radix+digit] + offsets[digit*p.chunks+group/groupSize] + stableRank(digit);
+    uint destination = prefix[histogramIndex(group,digit,p.activeRadix)] + offsets[digit*p.chunks+group/groupSize] + stableRank(digit);
     sortedKeys[destination] = keys[index];
     sortedValues[destination] = values[index];
 }

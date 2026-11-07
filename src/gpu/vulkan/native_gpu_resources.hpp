@@ -47,15 +47,26 @@ void createNativeCompute(DeviceContext context,
                          NativePipeline& pipeline,
                          std::string_view directory,
                          std::string_view name,
+                         std::span<const VkDescriptorType> types,
+                         std::uint32_t pushBytes);
+void createNativeCompute(DeviceContext context,
+                         NativePipeline& pipeline,
+                         std::string_view directory,
+                         std::string_view name,
                          std::uint32_t bindings,
                          std::uint32_t pushBytes);
 void bindNativeBuffers(VkCommandBuffer command,
                        const NativePipeline& pipeline,
                        VkPipelineBindPoint bindPoint,
-                       std::initializer_list<const NativeBuffer*> buffers);
+                       std::initializer_list<const NativeBuffer*> buffers,
+                       const NativeBuffer* control = nullptr);
 void nativeMemoryBarrier(VkCommandBuffer command,
                          VkPipelineStageFlags sourceStage,
                          VkAccessFlags sourceAccess,
                          VkPipelineStageFlags destinationStage,
                          VkAccessFlags destinationAccess);
+void nativeImageBarrier(VkCommandBuffer command,
+                        VkPipelineStageFlags sourceStage,
+                        VkPipelineStageFlags destinationStage,
+                        const VkImageMemoryBarrier& barrier);
 }

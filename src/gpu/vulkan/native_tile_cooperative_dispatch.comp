@@ -1,0 +1,11 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_control.glsl"
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) buffer Control { uint control[]; };
+void main() {
+    uint count=control[cooperativeCountWord];
+    control[cooperativeDispatchWord]=min(count,cooperativeDispatchColumns);
+    control[cooperativeDispatchWord+1]=max(1u,(count+cooperativeDispatchColumns-1)/cooperativeDispatchColumns);
+    control[cooperativeDispatchWord+2]=1;
+}

@@ -1,0 +1,39 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) readonly buffer Total { uint total[]; };
+layout(set=0,binding=1,std430) buffer Control { uint control[]; };
+void main() {
+    uvec2 grid = (p.viewport+binningWidth()-1)>>binningShift();
+    uint children = 1u<<(2u*binningScale());
+    uint required = total[0];
+    bool selected = required<=p.capacity;
+    uint reserved = selected ? required : 0;
+    control[reservedCountWord] = reserved;
+    control[1] = selected ? selectedFlag : overflowFlag;
+    uint count = selected ? reserved : 0;
+    control[0] = count;
+    uint cooperative=control[cooperativeCountWord];
+    control[cooperativeEmitWord]=selected ? min(cooperative,cooperativeDispatchColumns) : 0;
+    control[cooperativeEmitWord+1]=max(1u,(cooperative+cooperativeDispatchColumns-1)/cooperativeDispatchColumns);
+    control[cooperativeEmitWord+2]=1;
+    uint sources=control[sourceCountWord];
+    control[24] = selected ? (sources+255)/256 : 0;
+    control[25] = 1;
+    control[26] = 1;
+    control[27] = required;
+    control[2] = (count+255)/256;
+    control[3] = 1;
+    control[4] = 1;
+    control[5] = 256;
+    control[6] = (control[2]+255)/256;
+    control[7] = 1;
+    control[8] = 4;
+    control[9] = selected ? 0 : sources;
+    control[10] = 0;
+    control[11] = 0;
+    control[rasterDispatchWord] = selected ? grid.x*children : 0;
+    control[rasterDispatchWord+1] = selected ? grid.y : 0;
+    control[rasterDispatchWord+2] = 1;
+}

@@ -3,6 +3,10 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QTemporaryDir>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <cmath>
 #include <algorithm>
 #include <deque>
 #include <iostream>
@@ -113,6 +117,31 @@ void exportIsDeferredAndRejectsConcurrentWrites() {
             "Deferred export failed");
 }
 
+void calibratedCameraSurvivesBookmarkAndExport() {
+    Fixture fixture;
+    auto camera = fixture.state.camera();
+    camera.projection = orbelio::CameraProjection::Orthographic;
+    camera.intrinsics = orbelio::CameraIntrinsics{10, 20, .4f, .8f, 2, 2};
+    camera.nearClip = .2f;
+    camera.farClip = 20;
+    camera.rollDegrees = 30;
+    fixture.state.setCamera(camera);
+    fixture.tools->saveBookmark();
+    fixture.bridge.resetCamera();
+    fixture.tools->restoreBookmark(0);
+    const auto path = fixture.path("calibrated.json");
+    fixture.tools->exportCamera(path);
+    fixture.finishWrite();
+    QFile file(path.toLocalFile());
+    require(file.open(QIODevice::ReadOnly), "Cannot read calibrated camera export");
+    const auto document = QJsonDocument::fromJson(file.readAll()).object();
+    const auto projection = document["projection"].toObject();
+    require(document["version"] == 2 && projection["model"] == "orthographic" && projection["fx"] == 10 &&
+                projection["fy"] == 20 && std::abs(projection["cx"].toDouble() - .4) < 1e-6 &&
+                projection["farClip"] == 20 && document["rollDegrees"] == 30,
+            "Bookmark or camera export lost projection, calibration, clipping or roll");
+}
+
 void screenshotMatchesRequestAndDefersEncoding() {
     Fixture fixture;
     const auto destination = fixture.path("viewport.png");
@@ -173,6 +202,7 @@ int main(int argc, char** argv) {
     try {
         bookmarksAreBoundedAndRestoreFullState();
         exportIsDeferredAndRejectsConcurrentWrites();
+        calibratedCameraSurvivesBookmarkAndExport();
         screenshotMatchesRequestAndDefersEncoding();
         rejectedWritesAndSceneChangesRecover();
         destroyedReceiverDropsCompletion();

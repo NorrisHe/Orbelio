@@ -89,6 +89,7 @@ StaticScene evaluateFdu4d(const Fdu4dScene& source, double time, std::size_t max
     detail::validateDecodedScene(target);
     target.center = source.spatial.center;
     target.radius = source.spatial.radius;
+    target.antialiased = source.spatial.antialiased;
     target.memory.shrinkTo(count * (detail::baseFloatCount + target.shRestCoefficients() * 3) *
                            sizeof(float));
     return target;

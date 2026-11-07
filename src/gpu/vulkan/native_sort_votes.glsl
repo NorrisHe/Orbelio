@@ -1,7 +1,7 @@
 shared uint votes[radix * maskWords];
-void buildVotes(bool valid, uint digit) {
+void buildVotes(bool valid, uint digit, uint activeRadix) {
     uint local = gl_LocalInvocationIndex;
-    for (uint i = local; i < radix*maskWords; i += groupSize) votes[i] = 0;
+    for (uint i = local; i < activeRadix*maskWords; i += groupSize) votes[i] = 0;
     barrier();
     if (valid) atomicOr(votes[digit*maskWords + local/32], 1u << (local%32));
     barrier();

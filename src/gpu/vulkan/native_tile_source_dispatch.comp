@@ -1,0 +1,17 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "native_tile_parameters.glsl"
+layout(local_size_x=1) in;
+layout(set=0,binding=0,std430) readonly buffer Visibility { uint visibleCount; };
+layout(set=0,binding=1,std430) buffer Control { uint control[]; };
+void main() {
+    uint count=(p.options&1u)!=0 ? min(p.count,visibleCount) : p.count;
+    control[sourceCountWord]=count;
+    // The pair-sort and fallback arguments are unused until all source scans finish.
+    for (uint level=0; level<3; ++level) {
+        count=(count+255)/256;
+        control[level*3]=level==2 ? 1 : count;
+        control[level*3+1]=1;
+        control[level*3+2]=1;
+    }
+}

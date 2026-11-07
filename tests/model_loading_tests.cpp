@@ -200,6 +200,21 @@ void admissionAndBudgetsFailWithoutPoisoningTheSession() {
     fixture.loadReady(bikerPath);
 }
 
+void checkpointRequiresConversionBeforeReading() {
+    Fixture fixture;
+    fixture.loadReady(guitarPath);
+    fixture.model->loadModel(bikerPath);
+    fixture.model->loadModel("sear_steak.PTH");
+    require(fixture.model->loadState() == "Error" && fixture.model->ioStatus().contains("convert_fdu4d.py") &&
+                fixture.model->ioStatus().contains(".fdu4d"),
+            "Viewer did not explain how to open the checkpoint");
+    fixture.completeRead();
+    require(fixture.worker.tasks.empty() && fixture.reader.paths == QStringList{guitarPath, bikerPath} &&
+                fixture.model->loadState() == "Error" && fixture.model->modelPath() == guitarPath,
+            "Checkpoint was read or an obsolete result replaced the displayed scene");
+    fixture.loadReady(bikerPath);
+}
+
 void failedUploadRestoresThePreviousSceneAndCamera() {
     Fixture fixture;
     fixture.loadReady(guitarPath);
@@ -292,6 +307,7 @@ int main(int argc, char** argv) {
         unloadInvalidatesReadAndQueuedResult();
         invalidDropSupersedesLoadingAndUnicodePathsWork();
         admissionAndBudgetsFailWithoutPoisoningTheSession();
+        checkpointRequiresConversionBeforeReading();
         failedUploadRestoresThePreviousSceneAndCamera();
         closingDropsLateCompletions();
         inspectorTracksCommittedAssetsAndRangeSettings();

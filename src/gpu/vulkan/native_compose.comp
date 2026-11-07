@@ -2,9 +2,23 @@
 layout(local_size_x=16,local_size_y=16) in;
 layout(set=0,binding=0) uniform sampler2D accumulated;
 layout(set=0,binding=1,rgba8) writeonly uniform image2D target;
+layout(push_constant) uniform Parameters { vec4 background; uvec4 controls; } p;
+#ifdef FLOAT_OUTPUT
+layout(set=0,binding=2,rgba32f) writeonly uniform image2D floatColorAlpha;
+layout(set=0,binding=3) uniform sampler2D accumulatedDepth;
+layout(set=0,binding=4,rgba32f) writeonly uniform image2D depth;
+#endif
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(pixel,textureSize(accumulated,0)))) return;
     vec4 value = texelFetch(accumulated,pixel,0);
-    imageStore(target,pixel,vec4(value.rgb+value.a*vec3(0.035,0.045,0.065),1));
+    imageStore(target,pixel,vec4(value.rgb+value.a*p.background.rgb,1));
+#ifdef FLOAT_OUTPUT
+    float opacity = 1-value.a;
+    if ((p.controls.x&2u) != 0) imageStore(floatColorAlpha,pixel,vec4(value.rgb,opacity));
+    if ((p.controls.x&4u) != 0) {
+        float weightedDepth = texelFetch(accumulatedDepth,pixel,0).r;
+        imageStore(depth,pixel,vec4(weightedDepth,opacity>0 ? weightedDepth/opacity : 0,value.a,opacity));
+    }
+#endif
 }

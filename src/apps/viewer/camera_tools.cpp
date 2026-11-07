@@ -15,26 +15,46 @@ constexpr std::size_t rgbaChannels = 4;
 
 QJsonArray vectorJson(const std::array<float, 3>& vector) { return {vector[0], vector[1], vector[2]}; }
 
+QJsonObject projectionDocument(const CameraState& camera, const CameraView& view) {
+    return {{"model", camera.projection == CameraProjection::Orthographic ? "orthographic" : "pinhole"},
+            {"fx", view.intrinsics[0]},
+            {"fy", view.intrinsics[1]},
+            {"cx", view.intrinsics[2]},
+            {"cy", view.intrinsics[3]},
+            {"nearClip", camera.nearClip},
+            {"farClip", camera.farClip ? QJsonValue(*camera.farClip) : QJsonValue(QJsonValue::Null)},
+            {"orthographicSpan", camera.orthographicSpan}};
+}
+
 QByteArray cameraDocument(const CameraState& camera, std::uint32_t width, std::uint32_t height) {
     const auto view = cameraView(camera, width, height);
+    const bool calibrated = camera.intrinsics || camera.projection != CameraProjection::Perspective ||
+                            camera.rollDegrees != 0 || camera.nearClip != CameraState{}.nearClip ||
+                            camera.farClip;
     QJsonArray matrix;
     for (const auto value : view.worldToCamera) {
         matrix.append(value);
     }
-    return QJsonDocument(QJsonObject{{"schema", "orbelio.camera"},
-                                     {"version", 1},
-                                     {"mode", camera.freeFlight ? "free" : "orbit"},
-                                     {"target", vectorJson(camera.target)},
-                                     {"distance", camera.distance},
-                                     {"yawDegrees", camera.yawDegrees},
-                                     {"pitchDegrees", camera.pitchDegrees},
-                                     {"verticalFieldOfViewDegrees", camera.verticalFieldOfViewDegrees},
-                                     {"fovAxis", "shorter viewport axis"},
-                                     {"sceneRadius", camera.sceneRadius},
-                                     {"eye", vectorJson(view.eye)},
-                                     {"worldToCameraColumnMajor", matrix},
-                                     {"coordinates", "right/down/forward camera axes; world up is -Y"},
-                                     {"viewportPixels", QJsonArray{int(width), int(height)}}})
+    return QJsonDocument(
+               QJsonObject{{"schema", "orbelio.camera"},
+                           {"version", calibrated ? 2 : 1},
+                           {"mode", camera.freeFlight ? "free" : "orbit"},
+                           {"target", vectorJson(camera.target)},
+                           {"distance", camera.distance},
+                           {"yawDegrees", camera.yawDegrees},
+                           {"pitchDegrees", camera.pitchDegrees},
+                           {"rollDegrees", camera.rollDegrees},
+                           {"projection", projectionDocument(camera, view)},
+                           {"verticalFieldOfViewDegrees", camera.verticalFieldOfViewDegrees},
+                           {"fovAxis",
+                            camera.intrinsics                                     ? "calibrated intrinsics"
+                            : camera.projection == CameraProjection::Orthographic ? "orthographic span"
+                                                                                  : "shorter viewport axis"},
+                           {"sceneRadius", camera.sceneRadius},
+                           {"eye", vectorJson(view.eye)},
+                           {"worldToCameraColumnMajor", matrix},
+                           {"coordinates", "right/down/forward camera axes; world up is -Y"},
+                           {"viewportPixels", QJsonArray{int(width), int(height)}}})
         .toJson();
 }
 

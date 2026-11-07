@@ -1,5 +1,4 @@
 #include "fdu4d_gs_renderer.hpp"
-#include <chrono>
 
 namespace orbelio {
 void Fdu4dGsRenderer::render(const FrameState& frame,
@@ -10,22 +9,19 @@ void Fdu4dGsRenderer::render(const FrameState& frame,
     if (!frame.fdu4d || frame.scene) {
         throw std::invalid_argument("FDU renderer requires one dynamic scene");
     }
-    const auto start = std::chrono::steady_clock::now();
-    const auto time = frame.fdu4d->clampTime(frame.timestampSeconds);
-    const auto count = frame.renderSettings.budgetedCount(frame.fdu4d->count());
-    const bool changed = source_ != frame.fdu4d || time_ != time || evaluated_->count() != count;
-    if (changed) {
-        evaluated_ = std::make_shared<StaticScene>(evaluateFdu4d(*frame.fdu4d, time, count));
-        source_ = frame.fdu4d;
-        time_ = time;
-    }
-    const auto evaluationMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    const auto& source = *frame.fdu4d;
+    const GaussianTemporalView temporal{source.times,
+                                        source.variances,
+                                        source.velocities,
+                                        source.temporalSh,
+                                        source.temporalDegree,
+                                        source.clampTime(frame.timestampSeconds),
+                                        source.endTime - source.startTime};
     auto conditioned = frame;
+    conditioned.scene = std::shared_ptr<const StaticScene>(frame.fdu4d, &source.spatial);
     conditioned.fdu4d.reset();
-    conditioned.scene = evaluated_;
-    rasterizer_.render(conditioned, image, view, initialized, report);
-    report.frame.temporalEvaluationCpuMs = changed ? evaluationMs : 0.;
+    rasterizer_.renderTemporal(conditioned, temporal, image, view, initialized, report);
+    report.frame.temporalEvaluationCpuMs = 0.;
     report.frame.gaussianCount = frame.fdu4d->count();
 }
 }

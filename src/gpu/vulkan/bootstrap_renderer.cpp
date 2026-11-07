@@ -1,5 +1,5 @@
 #include "bootstrap_renderer.hpp"
-#include "static_gs_renderer.hpp"
+#include "native_gaussian_renderer.hpp"
 #include "fdu4d_gs_renderer.hpp"
 #ifdef ORBELIO_TRACY_ENABLED
 #include <tracy/Tracy.hpp>
@@ -292,6 +292,20 @@ bool BootstrapRenderer::resize(std::uint32_t width, std::uint32_t height) {
     return true;
 }
 
+VulkanRenderImages BootstrapRenderer::outputImages() const {
+    guard_.check();
+    auto result = gs_ ? gs_->outputImages() : VulkanRenderImages{};
+    if (imageHasContent_) {
+        result.display = {image_,
+                          imageView_,
+                          VK_FORMAT_R8G8B8A8_UNORM,
+                          {width_, height_},
+                          {report_.frame.viewportWidth, report_.frame.viewportHeight},
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    return result;
+}
+
 void BootstrapRenderer::render(const FrameState& state) {
 #ifdef ORBELIO_TRACY_ENABLED
     ZoneScoped;
@@ -299,6 +313,9 @@ void BootstrapRenderer::render(const FrameState& state) {
     guard_.check();
     if (fencePending_ || !image_) {
         throw std::logic_error("Invalid frame submission state");
+    }
+    if (!state.width || !state.height || state.width > width_ || state.height > height_) {
+        throw std::invalid_argument("Frame dimensions exceed the resized target");
     }
     report_.frame.gpuWaitMs = 0;
     frameStart_ = Clock::now();
@@ -325,7 +342,7 @@ void BootstrapRenderer::renderGaussians(const FrameState& state) {
         if (usesFdu4d) {
             gs_ = std::make_unique<Fdu4dGsRenderer>(context_, allocator_, shaderDirectory_);
         } else {
-            gs_ = std::make_unique<StaticGsRenderer>(context_, allocator_, shaderDirectory_);
+            gs_ = std::make_unique<NativeGaussianRenderer>(context_, allocator_, shaderDirectory_);
         }
         gsUsesFdu4d_ = usesFdu4d;
     }

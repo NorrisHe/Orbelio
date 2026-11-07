@@ -44,12 +44,15 @@ inline void vkCheck(VkResult result, const char* operation) {
 }
 
 // Borrowed from the GUI/platform bootstrap. Must outlive all engine resources.
+// Use one graphics+compute queue, enable bufferDeviceAddress and VK_KHR_push_descriptor,
+// and load the device entry points through volk before creating a renderer.
 struct DeviceContext {
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queueFamily = 0;
+    bool pipelineStatisticsEnabled = false;
 };
 
 class RenderThreadGuard {

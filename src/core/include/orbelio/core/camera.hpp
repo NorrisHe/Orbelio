@@ -2,8 +2,20 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace orbelio {
+enum class CameraProjection { Perspective, Orthographic };
+
+struct CameraIntrinsics {
+    float fx = 1;
+    float fy = 1;
+    float cx = 0;
+    float cy = 0;
+    std::uint32_t width = 1;
+    std::uint32_t height = 1;
+};
+
 struct CameraState {
     CameraState();
 
@@ -11,9 +23,15 @@ struct CameraState {
     float distance{};
     float yawDegrees = 0;
     float pitchDegrees{};
+    float rollDegrees = 0;
     float verticalFieldOfViewDegrees{};
     float sceneRadius = 1;
     bool freeFlight = false;
+    CameraProjection projection = CameraProjection::Perspective;
+    std::optional<CameraIntrinsics> intrinsics;
+    float orthographicSpan = 2.5f;
+    float nearClip = .01f;
+    std::optional<float> farClip;
 
     void fit(const std::array<float, 3>& center, float radius);
     void reset(const std::array<float, 3>& center, float radius);
@@ -30,7 +48,12 @@ struct CameraView {
     std::array<float, 3> forward{};
     std::array<float, 16> worldToCamera{};
     float focalPixels = 1;
+    std::array<float, 4> intrinsics{};
+    std::array<float, 2> depthRange{};
+    CameraProjection projection = CameraProjection::Perspective;
 };
 
 CameraView cameraView(const CameraState& state, std::uint32_t width, std::uint32_t height);
+// Column-major rigid world-to-camera matrix, with +Z forward and +Y down.
+CameraState cameraFromViewMatrix(const std::array<float, 16>& matrix);
 }

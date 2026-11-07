@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <limits>
+#include <stdexcept>
 
 namespace orbelio {
 namespace {
@@ -19,6 +21,10 @@ constexpr float zoomExponentPerStep = .15f;
 constexpr float maximumZoomSteps = 100;
 constexpr float maximumMovementSeconds = .1f;
 constexpr float fastMovementFactor = 4;
+constexpr float fitOrthographicSpanFactor = 2.5f;
+constexpr float minimumNearClip = 1e-6f;
+constexpr float maximumProjectionCoefficient = 1e10f;
+constexpr float matrixTolerance = 1e-4f;
 
 struct CameraBasis {
     std::array<float, 3> right{};
@@ -33,9 +39,20 @@ CameraBasis cameraBasis(const CameraState& state) {
     const float cosineYaw = std::cos(yaw);
     const float sinePitch = std::sin(pitch);
     const float cosinePitch = std::cos(pitch);
-    return {.right = {-cosineYaw, 0, sineYaw},
-            .down = {sineYaw * sinePitch, cosinePitch, cosineYaw * sinePitch},
-            .forward = {-sineYaw * cosinePitch, sinePitch, -cosineYaw * cosinePitch}};
+    CameraBasis result{.right = {-cosineYaw, 0, sineYaw},
+                       .down = {sineYaw * sinePitch, cosinePitch, cosineYaw * sinePitch},
+                       .forward = {-sineYaw * cosinePitch, sinePitch, -cosineYaw * cosinePitch}};
+    if (state.rollDegrees != 0) {
+        const auto cosine = std::cos(state.rollDegrees * radiansPerDegree);
+        const auto sine = std::sin(state.rollDegrees * radiansPerDegree);
+        for (std::size_t axis = 0; axis < result.right.size(); ++axis) {
+            const auto right = result.right[axis];
+            const auto down = result.down[axis];
+            result.right[axis] = cosine * right + sine * down;
+            result.down[axis] = -sine * right + cosine * down;
+        }
+    }
+    return result;
 }
 
 float focalPixels(const CameraState& state, float extent) {
@@ -48,6 +65,68 @@ float dot(const std::array<float, 3>& first, const std::array<float, 3>& second)
 
 float framingDistance(float radius) {
     return radius * fitDistanceFactor * std::sqrt(1 + initialHeightRatio * initialHeightRatio);
+}
+
+void configureProjection(CameraView& view, const CameraState& state, float width, float height) {
+    view.projection = state.projection;
+    if (state.projection != CameraProjection::Perspective &&
+        state.projection != CameraProjection::Orthographic) {
+        throw std::invalid_argument("Unknown camera projection");
+    }
+    if (!state.intrinsics && state.projection == CameraProjection::Perspective &&
+        !(state.verticalFieldOfViewDegrees > 0 && state.verticalFieldOfViewDegrees < 180)) {
+        throw std::invalid_argument("Camera field of view must be between 0 and 180 degrees");
+    }
+    view.focalPixels = state.projection == CameraProjection::Orthographic
+                           ? std::min(width, height) / state.orthographicSpan
+                           : focalPixels(state, std::min(width, height));
+    view.intrinsics = {view.focalPixels, view.focalPixels, width * .5f, height * .5f};
+    if (state.intrinsics) {
+        const auto& lens = *state.intrinsics;
+        if (!lens.width || !lens.height) {
+            throw std::invalid_argument("Camera calibration image is empty");
+        }
+        const auto sx = width / lens.width;
+        const auto sy = height / lens.height;
+        view.intrinsics = {lens.fx * sx, lens.fy * sy, lens.cx * sx, lens.cy * sy};
+        view.focalPixels = view.intrinsics[0];
+    }
+    for (const auto value : view.intrinsics) {
+        if (!std::isfinite(value) || std::abs(value) > maximumProjectionCoefficient) {
+            throw std::invalid_argument("Camera intrinsics outside supported numeric range");
+        }
+    }
+    view.depthRange = {state.nearClip, state.farClip.value_or(std::numeric_limits<float>::max())};
+    if (view.intrinsics[0] <= 0 || view.intrinsics[1] <= 0 || !std::isfinite(state.nearClip) ||
+        state.nearClip < minimumNearClip || !std::isfinite(view.depthRange[1]) ||
+        view.depthRange[1] <= state.nearClip) {
+        throw std::invalid_argument("Invalid camera focal length or clipping range");
+    }
+}
+
+std::array<std::array<float, 3>, 3> rigidRows(const std::array<float, 16>& matrix) {
+    if (!std::all_of(matrix.begin(), matrix.end(), [](float x) { return std::isfinite(x); }) ||
+        std::abs(matrix[3]) > matrixTolerance || std::abs(matrix[7]) > matrixTolerance ||
+        std::abs(matrix[11]) > matrixTolerance || std::abs(matrix[15] - 1) > matrixTolerance) {
+        throw std::invalid_argument("Camera view matrix must be finite and affine");
+    }
+    const std::array<std::array<float, 3>, 3> rows{{{matrix[0], matrix[4], matrix[8]},
+                                                    {matrix[1], matrix[5], matrix[9]},
+                                                    {matrix[2], matrix[6], matrix[10]}}};
+    for (std::size_t a = 0; a < rows.size(); ++a) {
+        for (std::size_t b = 0; b < rows.size(); ++b) {
+            if (std::abs(dot(rows[a], rows[b]) - float(a == b)) > matrixTolerance) {
+                throw std::invalid_argument("Camera view matrix rotation must be orthonormal");
+            }
+        }
+    }
+    const auto& a = rows[0];
+    const auto& b = rows[1];
+    const std::array cross{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    if (dot(cross, rows[2]) < 1 - matrixTolerance) {
+        throw std::invalid_argument("Camera view matrix rotation must preserve handedness");
+    }
+    return rows;
 }
 }
 
@@ -63,6 +142,7 @@ void CameraState::fit(const std::array<float, 3>& center, float radius) {
     target = center;
     sceneRadius = std::isfinite(radius) && radius > minimumSceneRadius ? radius : 1.f;
     distance = framingDistance(sceneRadius);
+    orthographicSpan = sceneRadius * fitOrthographicSpanFactor;
 }
 
 void CameraState::reset(const std::array<float, 3>& center, float radius) {
@@ -116,7 +196,14 @@ void CameraState::pan(float horizontalFraction, float verticalFraction) {
         return;
     }
     const auto basis = cameraBasis(*this);
-    const float span = distance / focalPixels(*this, 1);
+    float span = distance / focalPixels(*this, 1);
+    if (projection == CameraProjection::Orthographic) {
+        span = orthographicSpan;
+        if (intrinsics) {
+            span = intrinsics->width <= intrinsics->height ? intrinsics->width / intrinsics->fx
+                                                           : intrinsics->height / intrinsics->fy;
+        }
+    }
     auto next = target;
     for (std::size_t axis = 0; axis < target.size(); ++axis) {
         next[axis] -= span * (basis.right[axis] * horizontalFraction + basis.down[axis] * verticalFraction);
@@ -131,9 +218,19 @@ void CameraState::zoom(float steps) {
         return;
     }
     const float exponent = -std::clamp(steps, -maximumZoomSteps, maximumZoomSteps) * zoomExponentPerStep;
-    distance = std::clamp(distance * std::exp(exponent),
-                          sceneRadius * minimumDistanceFactor,
-                          sceneRadius * maximumDistanceFactor);
+    if (projection == CameraProjection::Orthographic && intrinsics) {
+        const auto fx = intrinsics->fx * std::exp(-exponent);
+        const auto fy = intrinsics->fy * std::exp(-exponent);
+        if (std::isfinite(fx) && std::isfinite(fy) && fx > 0 && fy > 0 &&
+            std::max(fx, fy) <= maximumProjectionCoefficient) {
+            intrinsics->fx = fx;
+            intrinsics->fy = fy;
+        }
+        return;
+    }
+    auto& size = projection == CameraProjection::Orthographic ? orthographicSpan : distance;
+    size = std::clamp(
+        size * std::exp(exponent), sceneRadius * minimumDistanceFactor, sceneRadius * maximumDistanceFactor);
 }
 
 CameraView cameraView(const CameraState& state, std::uint32_t width, std::uint32_t height) {
@@ -153,8 +250,33 @@ CameraView cameraView(const CameraState& state, std::uint32_t width, std::uint32
         view.worldToCamera[12 + row] = -dot(rows[row], view.eye);
     }
     view.worldToCamera[15] = 1;
+    if (!std::all_of(view.worldToCamera.begin(), view.worldToCamera.end(), [](float value) {
+            return std::isfinite(value);
+        })) {
+        throw std::invalid_argument("Camera transform must be finite");
+    }
     // Match the existing renderer's shorter-axis FOV, including portrait viewports.
-    view.focalPixels = focalPixels(state, static_cast<float>(std::max(1u, std::min(width, height))));
+    configureProjection(view, state, float(std::max(1u, width)), float(std::max(1u, height)));
     return view;
+}
+
+CameraState cameraFromViewMatrix(const std::array<float, 16>& matrix) {
+    const auto rows = rigidRows(matrix);
+    CameraState state;
+    state.freeFlight = true;
+    state.pitchDegrees = std::asin(std::clamp(rows[2][1], -1.f, 1.f)) / radiansPerDegree;
+    state.yawDegrees = std::atan2(-rows[2][0], -rows[2][2]) / radiansPerDegree;
+    const auto base = cameraBasis(state);
+    state.rollDegrees = std::atan2(dot(rows[0], base.down), dot(rows[0], base.right)) / radiansPerDegree;
+    for (std::size_t axis = 0; axis < state.target.size(); ++axis) {
+        const auto eye =
+            -(rows[0][axis] * matrix[12] + rows[1][axis] * matrix[13] + rows[2][axis] * matrix[14]);
+        state.target[axis] = eye + rows[2][axis] * state.distance;
+    }
+    if (!std::all_of(
+            state.target.begin(), state.target.end(), [](float value) { return std::isfinite(value); })) {
+        throw std::invalid_argument("Camera view matrix translation exceeds float range");
+    }
+    return state;
 }
 }

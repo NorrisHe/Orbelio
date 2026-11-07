@@ -1,20 +1,47 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
+#define SORT_CONTROL_BINDING 2
 #include "native_sort_parameters.glsl"
 layout(local_size_x = 256) in;
 layout(set=0,binding=0,std430) readonly buffer Totals { uint totals[]; };
 layout(set=0,binding=1,std430) writeonly buffer Offsets { uint offsets[]; };
+#ifdef VISIBLE_SORT
+layout(set=0,binding=2,std430) writeonly buffer VisibilityControl { uint control[]; };
+#endif
 shared uint binTotals[radix];
 void main() {
+    SortParameters p = sortParameters();
+#ifndef VISIBLE_SORT
+    if (p.count == 0) return;
+#endif
     uint bin = gl_LocalInvocationIndex;
     uint sum = 0;
-    for (uint chunk=0; chunk<p.chunks; ++chunk) {
+    for (uint chunk=0; chunk<(bin<p.activeRadix ? p.chunks : 0); ++chunk) {
         offsets[bin*p.chunks+chunk] = sum;
         sum += totals[bin*p.chunks+chunk];
     }
     binTotals[bin] = sum;
     barrier();
+    if (bin>=p.activeRadix) return;
     uint base = 0;
     for (uint previous=0; previous<bin; ++previous) base += binTotals[previous];
     for (uint chunk=0; chunk<p.chunks; ++chunk) offsets[bin*p.chunks+chunk] += base;
+#ifdef VISIBLE_SORT
+    if (bin==p.activeRadix-1) {
+        uint count=base+sum;
+        uint groups=(count+groupSize-1)/groupSize;
+        control[0]=count;
+        control[1]=0;
+        control[2]=groups;
+        control[3]=1;
+        control[4]=1;
+        control[5]=radix;
+        control[6]=(groups+groupSize-1)/groupSize;
+        control[7]=1;
+        control[8]=4;
+        control[9]=count;
+        control[10]=0;
+        control[11]=0;
+    }
+#endif
 }

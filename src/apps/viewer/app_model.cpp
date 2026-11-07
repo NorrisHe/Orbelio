@@ -216,6 +216,12 @@ void AppModel::loadModel(const QString& path) {
         return;
     }
     sequencePlayer_.setPlaying(false);
+    if (QFileInfo(path).suffix().compare(QLatin1String("pth"), Qt::CaseInsensitive) == 0) {
+        ++requestGeneration_;
+        failModelLoad("PyTorch .pth checkpoints require conversion before viewing. "
+                      "For FDU 4DGS, use scripts/convert_fdu4d.py, then open the .fdu4d file.");
+        return;
+    }
     pendingRequest_ = LoadRequest{++requestGeneration_, path};
     uploadPendingVersion_.reset();
     loadState_ = LoadState::Loading;
