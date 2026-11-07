@@ -18,9 +18,11 @@ qt_add_resources(orbelio_viewer viewer_sample PREFIX "/samples" BASE "${PROJECT_
     FILES "${PROJECT_SOURCE_DIR}/samples/guitar/guitar.compressed.ply")
 set_target_properties(orbelio_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 get_target_property(viewer_shader_binaries orbelio_vulkan ORBELIO_SHADER_BINARIES)
-add_custom_target(orbelio_viewer_shaders ALL
+add_custom_target(orbelio_viewer_shaders
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:orbelio_viewer>/shaders"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${viewer_shader_binaries}
         "$<TARGET_FILE_DIR:orbelio_viewer>/shaders"
-    DEPENDS orbelio_viewer VERBATIM)
+    VERBATIM)
+add_dependencies(orbelio_viewer_shaders orbelio_native_shaders)
+add_dependencies(orbelio_viewer orbelio_viewer_shaders)

@@ -77,14 +77,16 @@ void NativeRenderTargets::createPass(bool withDepth, bool withNormals) {
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1 + std::uint32_t(withDepth) + std::uint32_t(withNormals);
     subpass.pColorAttachments = references.data();
+    const VkAccessFlags previousAccess =
+        withNormals ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                    : VK_ACCESS_SHADER_READ_BIT;
     const std::array<VkSubpassDependency, 2> dependencies{
         {{VK_SUBPASS_EXTERNAL,
           0,
           withNormals ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-          withNormals ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                      : VK_ACCESS_SHADER_READ_BIT,
+          previousAccess,
           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
           0},
          {0,
