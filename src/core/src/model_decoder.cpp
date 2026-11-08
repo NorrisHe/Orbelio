@@ -4,15 +4,15 @@
 namespace orbelio {
 namespace {
 using Reader = StaticScene (*)(std::span<const std::byte>, detail::DecodeContext&);
+}
 
-std::string extensionOf(std::string_view filename) {
+std::string detail::extensionOf(std::string_view filename) {
     const auto dot = filename.find_last_of('.');
     std::string extension(dot == std::string_view::npos ? "" : filename.substr(dot));
     for (auto& character : extension) {
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
     }
     return extension;
-}
 }
 
 StaticScene decodeModel(std::span<const std::byte> bytes,
@@ -38,7 +38,7 @@ DecodedScene decodeScene(std::span<const std::byte> bytes,
                          ModelAssetResolver resolver) {
     detail::require(!bytes.empty() && bytes.size() <= limits.inputBytes, "Input exceeds model byte budget");
     detail::DecodeContext context{limits, resident, std::move(resolver)};
-    const auto extension = extensionOf(filename);
+    const auto extension = detail::extensionOf(filename);
     const std::string_view prefix(reinterpret_cast<const char*>(bytes.data()), std::min(bytes.size(), 4uz));
     if (prefix == "FDU4" || extension == ".fdu4d") {
         return detail::readFdu4d(bytes, context);

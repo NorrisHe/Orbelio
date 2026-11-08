@@ -6,20 +6,48 @@
 #include <stdexcept>
 
 namespace orbelio {
-BytePool::Lease QtAssetReader::read(std::string_view asset, BytePool& pool, std::size_t limitBytes) {
-    QThread::currentThread()->setObjectName("Orbelio.IO");
-    QFile file(QString::fromUtf8(asset.data(), static_cast<qsizetype>(asset.size())));
-    if (!file.open(QIODevice::ReadOnly)) {
-        throw std::runtime_error(file.errorString().toStdString());
+namespace {
+class QtAssetStream final : public IAssetStream {
+public:
+    explicit QtAssetStream(std::string_view asset)
+        : file_(QString::fromUtf8(asset.data(), static_cast<qsizetype>(asset.size()))) {
+        if (!file_.open(QIODevice::ReadOnly)) {
+            throw std::runtime_error(file_.errorString().toStdString());
+        }
+        const auto size = file_.size();
+        if (size <= 0 || !std::in_range<std::size_t>(size)) {
+            throw std::runtime_error("Invalid model file size");
+        }
+        size_ = static_cast<std::size_t>(size);
     }
-    const auto size = file.size();
-    if (size <= 0 || static_cast<std::uint64_t>(size) > limitBytes) {
+
+    std::size_t size() const override { return size_; }
+
+    void read(std::span<std::byte> destination) override {
+        const auto size = static_cast<qint64>(destination.size());
+        if (file_.read(reinterpret_cast<char*>(destination.data()), size) != size) {
+            throw std::runtime_error("Incomplete model read");
+        }
+    }
+
+private:
+    QFile file_;
+    std::size_t size_ = 0;
+};
+}
+
+std::unique_ptr<IAssetStream> QtAssetReader::openStream(std::string_view asset) {
+    QThread::currentThread()->setObjectName("Orbelio.IO");
+    return std::make_unique<QtAssetStream>(asset);
+}
+
+BytePool::Lease QtAssetReader::read(std::string_view asset, BytePool& pool, std::size_t limitBytes) {
+    const auto stream = openStream(asset);
+    if (stream->size() > limitBytes) {
         throw std::runtime_error("Model file exceeds the configured read budget");
     }
-    auto bytes = pool.acquire(static_cast<std::size_t>(size));
-    if (file.read(reinterpret_cast<char*>(bytes.bytes().data()), size) != size) {
-        throw std::runtime_error("Incomplete model read");
-    }
+    auto bytes = pool.acquire(stream->size());
+    stream->read(bytes.bytes());
     return bytes;
 }
 

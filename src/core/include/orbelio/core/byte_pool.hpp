@@ -1,6 +1,8 @@
 #pragma once
 
 #include "types.hpp"
+#include "memory_budget.hpp"
+#include <limits>
 #include <memory>
 #include <span>
 
@@ -33,7 +35,9 @@ public:
         std::size_t size_ = 0;
     };
 
-    explicit BytePool(std::size_t budgetBytes);
+    explicit BytePool(std::size_t budgetBytes,
+                      std::size_t maxIdleBlockBytes = std::numeric_limits<std::size_t>::max(),
+                      MemoryBudget::AvailableBytes available = nullptr);
     Lease acquire(std::size_t bytes); // throws on invalid size or budget exhaustion
     PoolStats stats() const;
     void trim(); // releases only unused storage

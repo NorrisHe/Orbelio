@@ -7,11 +7,16 @@
 
 namespace orbelio {
 class MemoryBudget {
+public:
+    using AvailableBytes = std::size_t (*)();
+
+private:
     struct State {
         std::atomic_size_t used{0};
         std::size_t limit = 0;
+        AvailableBytes available = nullptr;
 
-        explicit State(std::size_t bytes) : limit(bytes) {}
+        State(std::size_t bytes, AvailableBytes query) : limit(bytes), available(query) {}
     };
 
 public:
@@ -66,9 +71,13 @@ public:
         std::size_t bytes_ = 0;
     };
 
-    explicit MemoryBudget(std::size_t bytes) : state_(std::make_shared<State>(bytes)) {}
+    explicit MemoryBudget(std::size_t bytes, AvailableBytes available = nullptr)
+        : state_(std::make_shared<State>(bytes, available)) {}
 
     Reservation reserve(std::size_t bytes) const {
+        if (state_->available && bytes > state_->available()) {
+            throw std::runtime_error("Not enough available system memory for model data");
+        }
         auto used = state_->used.load();
         do {
             if (bytes > state_->limit - used) {

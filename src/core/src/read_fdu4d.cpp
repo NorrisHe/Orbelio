@@ -47,15 +47,21 @@ void allocateTemporal(Fdu4dScene& scene, DecodeContext& context) {
     scene.velocities.resize(count * 3);
     scene.temporalSh.resize(count * coefficients * scene.temporalDegree * 3);
 }
-}
 
-Fdu4dScene readFdu4d(std::span<const std::byte> data, DecodeContext& context) {
-    const Bytes input(data);
-    require(data.size() >= fduHeaderBytes && std::memcmp(data.data(), "FDU4DGS\0", 8) == 0,
+struct FduLayout {
+    std::size_t stride = 0;
+    Fdu4dScene scene;
+};
+
+FduLayout readLayout(std::span<const std::byte> header, std::size_t fileBytes, DecodeContext& context) {
+    const Bytes input(header);
+    require(fileBytes >= fduHeaderBytes && header.size() >= fduHeaderBytes &&
+                std::memcmp(header.data(), "FDU4DGS\0", 8) == 0,
             "Invalid FDU 4DGS intermediate header");
     require(input.u32(8) == 1 && input.u32(12) == fduHeaderBytes && input.u64(32) == 0,
             "Unsupported FDU 4DGS intermediate version or flags");
     const auto count = input.u64(16);
+    require(std::in_range<std::size_t>(count), "FDU Gaussian count overflow");
     const auto degree = input.u32(24);
     Fdu4dScene scene{};
     scene.temporalDegree = input.u32(28);
@@ -70,14 +76,50 @@ Fdu4dScene readFdu4d(std::span<const std::byte> data, DecodeContext& context) {
             "Unsupported FDU SH layout (temporal SH requires spatial degree 3)");
     const auto coefficients = (degree + 1) * (degree + 1);
     const auto stride = (fduBaseFloats + coefficients * (scene.temporalDegree + 1) * 3) * sizeof(float);
-    require(checkedProduct(count, stride) == data.size() - fduHeaderBytes, "Invalid FDU payload length");
+    require(checkedProduct(count, stride) == fileBytes - fduHeaderBytes, "Invalid FDU payload length");
+    context.checkWorking(checkedProduct(count, stride));
     scene.spatial = context.createScene(count, degree, "FDU 4DGS");
     allocateTemporal(scene, context);
-    auto offset = fduHeaderBytes;
-    for (std::size_t index = 0; index < count; ++index) {
+    return {stride, std::move(scene)};
+}
+
+void readRows(std::span<const std::byte> data, Fdu4dScene& scene, std::size_t start, std::size_t count) {
+    const Bytes input(data);
+    std::size_t offset = 0;
+    for (std::size_t index = start; index < start + count; ++index) {
         readGaussian(input, offset, scene, index);
     }
+}
+}
+
+Fdu4dScene readFdu4d(std::span<const std::byte> data, DecodeContext& context) {
+    auto layout = readLayout(data, data.size(), context);
+    auto& scene = layout.scene;
+    readRows(data.subspan(fduHeaderBytes), scene, 0, scene.count());
     finishDecodedScene(scene.spatial);
-    return scene;
+    return std::move(scene);
+}
+
+Fdu4dScene readFdu4d(IAssetStream& stream, BytePool& pool, DecodeContext& context) {
+    std::array<std::byte, fduHeaderBytes> header{};
+    require(stream.size() >= header.size(), "Invalid FDU 4DGS intermediate header");
+    stream.read(header);
+    auto layout = readLayout(header, stream.size(), context);
+    auto& scene = layout.scene;
+    const auto stride = layout.stride;
+    const auto batch =
+        std::min(scene.count(), std::min(context.limits.inputBytes, IAssetStream::blockBytes) / stride);
+    require(batch != 0, "FDU input pool budget cannot hold a Gaussian record");
+    auto buffer = pool.acquire(batch * stride);
+    for (std::size_t start = 0; start < scene.count();) {
+        const auto count = std::min(batch, scene.count() - start);
+        const auto bytes = buffer.bytes().first(count * stride);
+        stream.read(bytes);
+        readRows(bytes, scene, start, count);
+        start += count;
+    }
+    buffer = {};
+    finishDecodedScene(scene.spatial);
+    return std::move(scene);
 }
 }

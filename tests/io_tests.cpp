@@ -1,12 +1,14 @@
 #include <io_executor.hpp>
 #include <asset_reader.hpp>
 #include <orbelio/core/scene_loader.hpp>
+#include "fdu_fixture.hpp"
 #include <QCoreApplication>
 #include <QThread>
 #include <atomic>
 #include <functional>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -157,6 +159,59 @@ void checkQueuedSceneReadsKeepSeparateMemoryBudgets(orbelio::QtIoExecutor& io) {
     results.clear();
     require(loader.residentBytes() == 0, "Consumed queued results retained resident memory");
 }
+
+void checkStreamedFduScene(orbelio::QtIoExecutor& io) {
+    constexpr std::size_t count = 130;
+    constexpr std::size_t headerBytes = 64;
+    auto bytes = fdu_fixture::model();
+    const auto row = bytes.substr(headerBytes);
+    bytes.resize(headerBytes);
+    std::string encodedCount;
+    fdu_fixture::append(encodedCount, std::uint64_t(count));
+    bytes.replace(16, encodedCount.size(), encodedCount);
+    for (std::size_t i = 0; i < count; ++i) {
+        bytes += row;
+    }
+
+    QTemporaryFile asset(QDir::tempPath() + "/orbelio-io-XXXXXX.FDU4D");
+    require(asset.open() && asset.write(bytes.data(), bytes.size()) == qsizetype(bytes.size()),
+            "Could not write streamed FDU fixture");
+    asset.close();
+    orbelio::QtAssetReader reader;
+    orbelio::BytePool pool(ioByteBudget);
+    ManualCompletions completions;
+    orbelio::ModelLimits limits{};
+    limits.inputBytes = ioByteBudget;
+    orbelio::SceneLoader loader(io, completions, reader, pool, limits);
+    auto load = [&] {
+        orbelio::SceneLoadResult result;
+        require(loader.load(asset.fileName().toUtf8().toStdString(),
+                            [&](auto loaded) { result = std::move(loaded); }),
+                "Could not queue streamed model");
+        io.drain();
+        require(completions.tasks.size() == 1, "Missing streamed model completion");
+        completions.tasks.front()();
+        completions.tasks.clear();
+        return result;
+    };
+    auto result = load();
+    require(bytes.size() > ioByteBudget && result.fdu4d && result.fdu4d->count() == count &&
+                result.fdu4d->times.back() == .25f && pool.stats().peakBytes == ioByteBudget &&
+                pool.stats().activeBytes == 0 && pool.stats().allocations == 1,
+            "FDU file did not decode completely through one reused input block");
+    result.fdu4d.reset();
+
+    QFile corrupt(asset.fileName());
+    std::string invalid;
+    fdu_fixture::append(invalid, std::numeric_limits<float>::quiet_NaN());
+    require(corrupt.open(QIODevice::ReadWrite) && corrupt.seek(corrupt.size() - qsizetype(invalid.size())) &&
+                corrupt.write(invalid.data(), invalid.size()) == qsizetype(invalid.size()),
+            "Could not corrupt the last streamed record");
+    corrupt.close();
+    result = load();
+    require(!result.fdu4d && !result.error.empty() && !loader.residentBytes() && !pool.stats().activeBytes,
+            "Failed streamed decode retained a scene or input lease");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -167,6 +222,7 @@ int main(int argc, char** argv) {
         checkBackpressure(io);
         checkExceptionAccounting(io);
         checkQueuedSceneReadsKeepSeparateMemoryBudgets(io);
+        checkStreamedFduScene(io);
         checkStopRejects(io);
         std::cout << "Single-worker reuse, backpressure, exception accounting and stop: PASS\n";
         return 0;

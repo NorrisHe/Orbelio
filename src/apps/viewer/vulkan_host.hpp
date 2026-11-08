@@ -35,6 +35,7 @@ private:
         bool timelineSemaphore = false;
         bool bufferDeviceAddress = false;
         bool pipelineStatistics = false;
+        bool memoryBudget = false;
     };
 
     // Instance bootstrap, in the order Vulkan 1.3 + Qt require: choose layers and extensions,

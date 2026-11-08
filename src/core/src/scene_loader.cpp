@@ -1,5 +1,6 @@
 #include <orbelio/core/scene_loader.hpp>
 #include <orbelio/core/model_decoder.hpp>
+#include "model_decode_internal.hpp"
 #include <chrono>
 #include <exception>
 #include <stdexcept>
@@ -58,6 +59,45 @@ std::string firstFrame(SceneLoadResult& result,
     return result.sequence->frames.front().asset;
 }
 
+class TimedAssetStream final : public IAssetStream {
+public:
+    TimedAssetStream(IAssetStream& stream, std::optional<double>& readMs, const SceneLoader::Now& now)
+        : stream_(stream), readMs_(readMs), now_(now) {}
+
+    std::size_t size() const override { return stream_.size(); }
+
+    void read(std::span<std::byte> destination) override {
+        StageTimer timer(readMs_, now_);
+        stream_.read(destination);
+    }
+
+private:
+    IAssetStream& stream_;
+    std::optional<double>& readMs_;
+    const SceneLoader::Now& now_;
+};
+
+bool readStreamedScene(IAssetReader& reader,
+                       BytePool& pool,
+                       std::string_view asset,
+                       detail::DecodeContext& context,
+                       SceneLoadResult& result,
+                       const SceneLoader::Now& now) {
+    if (detail::extensionOf(asset) != ".fdu4d") {
+        return false;
+    }
+    const auto started = now();
+    auto stream = reader.openStream(asset);
+    if (!stream) {
+        return false;
+    }
+    result.timings.readMs = milliseconds(started, now());
+    TimedAssetStream timed(*stream, result.timings.readMs, now);
+    assignScene(result, detail::readFdu4d(timed, pool, context));
+    result.timings.decodeMs = std::max(0., milliseconds(started, now()) - *result.timings.readMs);
+    return true;
+}
+
 SceneLoadResult readScene(IAssetReader& reader,
                           BytePool& pool,
                           std::string_view asset,
@@ -67,6 +107,11 @@ SceneLoadResult readScene(IAssetReader& reader,
     const auto start = now();
     SceneLoadResult result{};
     try {
+        detail::DecodeContext context{limits, resident, {}};
+        if (readStreamedScene(reader, pool, asset, context, result, now)) {
+            result.ioMilliseconds = milliseconds(start, now());
+            return result;
+        }
         auto bytes = readAsset(reader, pool, asset, limits, result.timings, now);
         if (bytes.bytes().size() > limits.inputBytes) {
             throw std::runtime_error("Asset reader exceeded the model byte budget");
@@ -124,8 +169,9 @@ SceneLoader::SceneLoader(IExecutor& worker,
                          IAssetReader& reader,
                          BytePool& pool,
                          ModelLimits limits,
-                         Now now)
-    : limits_(limits), resident_(limits.residentBytes), worker_(worker), completions_(completions),
+                         Now now,
+                         MemoryBudget::AvailableBytes available)
+    : limits_(limits), resident_(limits.residentBytes, available), worker_(worker), completions_(completions),
       reader_(reader), pool_(pool), now_(std::move(now)) {}
 
 bool SceneLoader::load(std::string asset, Completion completion) {

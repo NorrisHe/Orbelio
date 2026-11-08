@@ -99,6 +99,7 @@ std::optional<VulkanHost::Admission> VulkanHost::probeAdmission(VkPhysicalDevice
             "read device extensions");
 
     admission.pushDescriptors = hasExtension(available, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    admission.memoryBudget = hasExtension(available, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     admission.synchronization2 = supported13.synchronization2;
     admission.timelineSemaphore = supported12.timelineSemaphore;
     admission.bufferDeviceAddress = supported12.bufferDeviceAddress;
@@ -150,7 +151,9 @@ void VulkanHost::createLogicalDevice(VkPhysicalDevice physical,
     f12.timelineSemaphore = admission.timelineSemaphore;
     f12.bufferDeviceAddress = VK_TRUE;
 
-    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+    const char* extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+                                VK_EXT_MEMORY_BUDGET_EXTENSION_NAME};
     auto info = vkInfo<VkDeviceCreateInfo>(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
     info.queueCreateInfoCount = 1;
     info.pQueueCreateInfos = &queueInfo;
@@ -158,13 +161,14 @@ void VulkanHost::createLogicalDevice(VkPhysicalDevice physical,
     VkPhysicalDeviceFeatures features{};
     features.pipelineStatisticsQuery = admission.pipelineStatistics;
     info.pEnabledFeatures = &features;
-    info.enabledExtensionCount = 2;
+    info.enabledExtensionCount = 2 + std::uint32_t(admission.memoryBudget);
     info.ppEnabledExtensionNames = extensions;
 
     vkCheck(vkCreateDevice(physical, &info, nullptr, &context_.device), "vkCreateDevice");
     context_.physicalDevice = physical;
     context_.queueFamily = queueFamily;
     context_.pipelineStatisticsEnabled = admission.pipelineStatistics;
+    context_.memoryBudgetEnabled = admission.memoryBudget;
     volkLoadDevice(context_.device);
     vkGetDeviceQueue(context_.device, queueFamily, 0, &context_.queue);
     deviceName_ = QString::fromUtf8(admission.properties.deviceName);

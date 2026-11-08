@@ -55,10 +55,11 @@ void reserveBuffer(VmaAllocator allocator,
     info.size = bytes;
     info.usage = usage;
     VmaAllocationCreateInfo memory{};
+    memory.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
     memory.usage = host == NativeHostAccess::None ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE
                                                   : VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
     if (host != NativeHostAccess::None) {
-        memory.flags =
+        memory.flags |=
             VMA_ALLOCATION_CREATE_MAPPED_BIT |
             (host == NativeHostAccess::Upload ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
                                               : VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT);

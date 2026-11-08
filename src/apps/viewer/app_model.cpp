@@ -366,7 +366,8 @@ QVariantMap AppModel::resourceRows(const BackendStats& backend) const {
         mebibytes(backend.allocatorUsedBytes) + " / " + mebibytes(backend.allocatorReservedBytes));
     row("VMA used peak", mebibytes(backend.allocatorPeakBytes));
     row("CPU scenes + queued", mebibytes(sceneLoader_.residentBytes()));
-    row("GPU allocation limit", mebibytes(backend.allocatorBudgetBytes));
+    row("GPU allocation limit",
+        backend.allocatorBudgetBytes ? mebibytes(backend.allocatorBudgetBytes) : QStringLiteral("Automatic"));
     row("Input active / reserved", mebibytes(cpu.activeBytes) + " / " + mebibytes(cpu.reservedBytes));
     row("Input peak / allocations", mebibytes(cpu.peakBytes) + " / " + QString::number(cpu.allocations));
     row("GS allocations / reuse",

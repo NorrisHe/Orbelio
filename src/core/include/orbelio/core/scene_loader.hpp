@@ -42,7 +42,8 @@ public:
                 IAssetReader& reader,
                 BytePool& pool,
                 ModelLimits limits = {},
-                Now now = Clock::now);
+                Now now = Clock::now,
+                MemoryBudget::AvailableBytes available = nullptr);
 
     const ModelLimits& limits() const { return limits_; }
 

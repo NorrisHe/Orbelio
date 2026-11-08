@@ -16,6 +16,12 @@
 #include <QSettings>
 #include <algorithm>
 #include <iostream>
+#include <limits>
+#ifdef Q_OS_WIN
+#include <QtCore/qt_windows.h>
+#elif defined(Q_OS_UNIX)
+#include <unistd.h>
+#endif
 
 namespace {
 constexpr int preferredWindowWidth = 1200;
@@ -67,13 +73,35 @@ std::size_t budgetOption(const QCommandLineParser& parser, const char* name, std
     return static_cast<std::size_t>(value) * orbelio::ModelLimits::mebibyte;
 }
 
+std::size_t availableMemoryBytes() {
+#ifdef Q_OS_WIN
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) {
+        throw std::runtime_error("Could not query available Windows memory");
+    }
+    return static_cast<std::size_t>(std::min<unsigned long long>(
+        {status.ullAvailPhys, status.ullAvailPageFile, std::numeric_limits<std::size_t>::max()}));
+#elif defined(_SC_AVPHYS_PAGES)
+    const auto pages = sysconf(_SC_AVPHYS_PAGES);
+    const auto pageSize = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && pageSize > 0) {
+        const auto maximum = std::numeric_limits<std::size_t>::max();
+        return std::min(std::size_t(pages), maximum / std::size_t(pageSize)) * std::size_t(pageSize);
+    }
+#endif
+    return std::numeric_limits<std::size_t>::max();
+}
+
 orbelio::ModelLimits modelLimits(const QCommandLineParser& parser) {
     orbelio::ModelLimits limits{};
-    limits.inputBytes = budgetOption(parser, "input-budget-mib", limits.inputBytes);
-    limits.decodedBytes = budgetOption(parser, "decode-budget-mib", limits.decodedBytes);
-    limits.residentBytes = budgetOption(parser, "cpu-budget-mib", limits.residentBytes);
-    limits.gpuBytes = budgetOption(parser, "gpu-budget-mib", limits.gpuBytes);
-    limits.sequenceCacheBytes = budgetOption(parser, "sequence-cache-mib", limits.sequenceCacheBytes);
+    const auto automatic = std::numeric_limits<std::size_t>::max();
+    limits.inputBytes = budgetOption(parser, "input-budget-mib", automatic);
+    limits.decodedBytes = budgetOption(parser, "decode-budget-mib", automatic);
+    limits.residentBytes = budgetOption(parser, "cpu-budget-mib", automatic);
+    limits.gpuBytes = budgetOption(parser, "gpu-budget-mib", 0);
+    const auto cacheHeadroom = std::min(availableMemoryBytes(), limits.residentBytes) / 2;
+    limits.sequenceCacheBytes = budgetOption(parser, "sequence-cache-mib", cacheHeadroom);
     return limits;
 }
 
@@ -84,12 +112,14 @@ Options parseOptions(QGuiApplication& app) {
     parser.addVersionOption();
     parser.addOption({"validation", "Require the Khronos validation layer."});
     parser.addOption({"model", "Gaussian model path (default: bundled PlayCanvas guitar).", "path"});
-    parser.addOption({"input-budget-mib", "Input pool limit in MiB (default: 256).", "MiB"});
-    parser.addOption({"decode-budget-mib", "Per-model decode/workspace limit in MiB (default: 512).", "MiB"});
     parser.addOption(
-        {"cpu-budget-mib", "CPU scenes and pending results limit in MiB (default: 1024).", "MiB"});
-    parser.addOption({"gpu-budget-mib", "Engine GPU allocation/block limit in MiB (default: 1024).", "MiB"});
-    parser.addOption({"sequence-cache-mib", "Decoded sequence cache limit in MiB (default: 256).", "MiB"});
+        {"input-budget-mib", "Input pool limit in MiB (default: available system memory).", "MiB"});
+    parser.addOption(
+        {"decode-budget-mib", "Decode/workspace limit in MiB (default: available system memory).", "MiB"});
+    parser.addOption({"cpu-budget-mib", "CPU scene limit in MiB (default: available system memory).", "MiB"});
+    parser.addOption({"gpu-budget-mib", "GPU allocation limit in MiB (default: driver budget).", "MiB"});
+    parser.addOption(
+        {"sequence-cache-mib", "Sequence cache limit in MiB (default: based on available memory).", "MiB"});
     parser.addOption(
         {"splat-budget", "Maximum Gaussians submitted per frame; 0 keeps full quality.", "count"});
     parser.addOption({"upload-gaussians-per-frame", "GPU upload batch; 0 uploads all.", "count"});
@@ -167,11 +197,18 @@ void releaseWindow(QQuickView& view) {
 int runViewer(QGuiApplication& app, const Options& options) {
     // Declaration order guarantees: Window -> Model/IO -> Device -> Instance.
     orbelio::VulkanHost host(options.validation);
-    orbelio::BytePool cpuPool{options.limits.inputBytes};
+    orbelio::BytePool cpuPool{
+        options.limits.inputBytes, orbelio::IAssetStream::blockBytes, availableMemoryBytes};
     orbelio::QtAssetReader reader;
     orbelio::QtGuiExecutor completions;
     orbelio::QtIoExecutor ioExecutor(16, options.limits.inputBytes);
-    orbelio::SceneLoader loader(ioExecutor, completions, reader, cpuPool, options.limits);
+    orbelio::SceneLoader loader(ioExecutor,
+                                completions,
+                                reader,
+                                cpuPool,
+                                options.limits,
+                                orbelio::SceneLoader::Clock::now,
+                                availableMemoryBytes);
     orbelio::ViewportState viewport;
     viewport.setRenderSettings(options.renderSettings);
     orbelio::AppModel model(loader, viewport, cpuPool);

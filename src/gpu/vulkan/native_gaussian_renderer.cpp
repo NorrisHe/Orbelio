@@ -1309,6 +1309,9 @@ struct NativeGaussianRenderer::Impl {
             uploadedCount = previousUpload;
             throw;
         }
+        if (temporal.active() && previousUpload != uploadedCount && uploadedCount == targetCount) {
+            destroyBuffer(allocator, staging);
+        }
         for (auto* target : {&targets.colorAlpha, &targets.depth, &targets.normals}) {
             target->hasContent = target->resource.image != VK_NULL_HANDLE;
         }

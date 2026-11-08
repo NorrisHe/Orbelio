@@ -89,6 +89,7 @@ TargetImage createTargetImage(VmaAllocator allocator,
 
     VmaAllocationCreateInfo memory{};
     memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    memory.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
 
     TargetImage created;
     VmaAllocationInfo memoryInfo{};
@@ -202,9 +203,14 @@ void BootstrapRenderer::createAllocator() {
     info.vulkanApiVersion = VK_API_VERSION_1_3;
     info.pVulkanFunctions = &functions;
     info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-    info.pHeapSizeLimit = limits.data();
+    if (context_.memoryBudgetEnabled) {
+        info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    }
+    info.pHeapSizeLimit = gpuBudgetBytes_ ? limits.data() : nullptr;
     info.preferredLargeHeapBlockSize =
-        std::min<VkDeviceSize>(gpuBudgetBytes_ / allocatorBlockDivisor, maximumAllocatorBlockBytes);
+        gpuBudgetBytes_
+            ? std::min<VkDeviceSize>(gpuBudgetBytes_ / allocatorBlockDivisor, maximumAllocatorBlockBytes)
+            : maximumAllocatorBlockBytes;
     vkCheck(vmaCreateAllocator(&info, &allocator_), "vmaCreateAllocator");
 }
 

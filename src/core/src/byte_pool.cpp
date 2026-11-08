@@ -31,9 +31,12 @@ struct BytePool::State {
     std::mutex mutex;
     std::vector<Slot> slots;
     std::size_t budget;
+    std::size_t maxIdleBlockBytes;
+    MemoryBudget::AvailableBytes available;
     PoolStats counters;
 
-    explicit State(std::size_t bytes) : budget(bytes) {}
+    State(std::size_t bytes, std::size_t idleBytes, MemoryBudget::AvailableBytes query)
+        : budget(bytes), maxIdleBlockBytes(idleBytes), available(query) {}
 
     // Best fit: the smallest idle slot big enough for the request, earliest index on ties.
     std::size_t findReusableSlot(std::size_t capacity) const {
@@ -84,6 +87,12 @@ struct BytePool::State {
         if (capacity > budget - counters.reservedBytes) {
             throw std::runtime_error("CPU pool budget exceeded by active leases");
         }
+        if (available && capacity > available()) {
+            forgetIdleSlots();
+            if (capacity > available()) {
+                throw std::runtime_error("Not enough available system memory for model input");
+            }
+        }
         Slot fresh{std::make_unique<std::byte[]>(capacity), capacity};
         const std::size_t index = findVacantSlot();
         if (index == slots.size()) {
@@ -97,7 +106,10 @@ struct BytePool::State {
     }
 };
 
-BytePool::BytePool(std::size_t budgetBytes) : state_(std::make_shared<State>(budgetBytes)) {}
+BytePool::BytePool(std::size_t budgetBytes,
+                   std::size_t maxIdleBlockBytes,
+                   MemoryBudget::AvailableBytes available)
+    : state_(std::make_shared<State>(budgetBytes, maxIdleBlockBytes, available)) {}
 
 BytePool::Lease::Lease(std::shared_ptr<State> state, std::size_t slot, std::size_t size)
     : state_(std::move(state)), slot_(slot), size_(size) {}
@@ -126,6 +138,9 @@ void BytePool::Lease::release() {
         auto& slot = state_->slots[slot_];
         slot.used = false;
         state_->counters.activeBytes -= slot.capacity;
+        if (slot.capacity > state_->maxIdleBlockBytes) {
+            state_->forget(slot);
+        }
     }
     state_.reset();
     size_ = 0;

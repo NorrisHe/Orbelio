@@ -53,6 +53,7 @@ struct DeviceContext {
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queueFamily = 0;
     bool pipelineStatisticsEnabled = false;
+    bool memoryBudgetEnabled = false;
 };
 
 class RenderThreadGuard {

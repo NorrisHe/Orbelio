@@ -122,6 +122,7 @@ void NativeRenderTargets::createImage(NativeImage& image,
     info.usage = usage;
     VmaAllocationCreateInfo memory{};
     memory.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    memory.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
     VmaAllocationInfo allocation{};
     vkCheck(vmaCreateImage(allocator_, &info, &memory, &image.resource.image, &image.memory, &allocation),
             "vmaCreateImage native float target");
