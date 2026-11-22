@@ -1198,6 +1198,7 @@ struct NativeGaussianRenderer::Impl {
             rejectedTile = configuration;
             return false;
         }
+        rejectedTile.reset();
         return created;
     }
 
