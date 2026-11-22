@@ -1,25 +1,11 @@
 #pragma once
-#include "renderer_stats.hpp"
+#include "gaussian_temporal_view.hpp"
 #include "vma.hpp"
 #include "gaussian_renderer.hpp"
 #include <orbelio/core/types.hpp>
 #include <memory>
-#include <span>
 
 namespace orbelio {
-// Borrowed spans stay alive through the immutable owner in FrameState::scene.
-struct GaussianTemporalView {
-    std::span<const float> times;
-    std::span<const float> variances;
-    std::span<const float> velocities;
-    std::span<const float> harmonics;
-    unsigned degree = 0;
-    double time = 0;
-    double period = 1;
-
-    bool active() const { return !times.empty(); }
-};
-
 // Native EWA projection, stable GPU sorting and ordered floating-point alpha compositing.
 class NativeGaussianRenderer final : public IGaussianRenderer {
 public:

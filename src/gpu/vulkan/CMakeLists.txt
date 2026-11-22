@@ -5,7 +5,8 @@ target_compile_definitions(orbelio_vulkan_api INTERFACE VK_NO_PROTOTYPES)
 
 add_library(orbelio_vulkan STATIC renderer.cpp bootstrap_renderer.cpp native_gaussian_renderer.cpp
     native_gpu_resources.cpp native_radix_sort.cpp native_render_targets.cpp native_capture.cpp native_tile_raster.cpp
-    native_frame_commands.cpp native_frame_output.cpp fdu4d_gs_renderer.cpp vma.cpp)
+    native_scene_upload.cpp native_projection.cpp native_rasterizer.cpp native_frame_output.cpp
+    native_frame_commands.cpp fdu4d_gs_renderer.cpp vma.cpp)
 # VMA stays private: only this library's sources allocate, so vk_mem_alloc.h never reaches consumers.
 target_link_libraries(orbelio_vulkan PRIVATE GPUOpen::VulkanMemoryAllocator)
 target_compile_definitions(orbelio_vulkan PRIVATE VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
