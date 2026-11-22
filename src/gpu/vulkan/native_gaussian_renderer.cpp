@@ -1,4 +1,6 @@
 #include "native_gaussian_renderer.hpp"
+#include "native_frame_commands.hpp"
+#include "native_frame_output.hpp"
 #include "native_radix_sort.hpp"
 #include "native_render_targets.hpp"
 #include "native_capture.hpp"
@@ -10,18 +12,14 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <vector>
 
 namespace orbelio {
 namespace {
 using Clock = std::chrono::steady_clock;
+using Stamp = NativeFrameCommands::Stamp;
 constexpr std::uint32_t projectGroupSize = 256;
-constexpr std::uint32_t composeGroupSize = 16;
 // Rejected sentinels no longer extend the domain of positive FP32 camera depths.
 constexpr std::uint32_t positiveDepthKeyBits = 31;
-constexpr std::uint32_t frameTimestampCount = 7;
-constexpr std::uint32_t tileTimestampCount = 4;
-constexpr std::uint32_t timestampCount = frameTimestampCount + tileTimestampCount;
 constexpr std::size_t projectionCounterWords = 12;
 constexpr std::size_t projectionCounterBytes = projectionCounterWords * sizeof(std::uint32_t);
 constexpr std::size_t positionBytes = 4 * sizeof(float);
@@ -29,7 +27,6 @@ constexpr std::size_t orientationBytes = 8 * sizeof(float);
 constexpr std::size_t projectedBytes = 12 * sizeof(float);
 constexpr std::size_t normalBytes = 4 * sizeof(float);
 constexpr auto counterInterval = std::chrono::milliseconds(250);
-constexpr auto fenceWaitNs = std::numeric_limits<std::uint64_t>::max();
 constexpr double fullTurnDegrees = 360.;
 constexpr VkBufferUsageFlags physicalBufferUsage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -65,13 +62,6 @@ struct GraphicsParameters {
 
 static_assert(sizeof(GraphicsParameters) == 16);
 
-struct alignas(16) ComposeParameters {
-    std::array<float, 4> background{};
-    std::array<std::uint32_t, 4> controls{};
-};
-
-static_assert(sizeof(ComposeParameters) == 32);
-
 std::uint64_t counter64(const std::array<std::uint32_t, projectionCounterWords>& words, std::size_t first) {
     return std::uint64_t(words[first]) | (std::uint64_t(words[first + 1]) << 32);
 }
@@ -99,17 +89,6 @@ struct PreparedFrame {
 
 double milliseconds(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-}
-
-VkImageMemoryBarrier imageBarrier(VkImage image, VkImageLayout before, VkImageLayout after) {
-    auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-    barrier.image = image;
-    barrier.oldLayout = before;
-    barrier.newLayout = after;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    return barrier;
 }
 
 VkPipelineColorBlendAttachmentState blendState() {
@@ -153,7 +132,8 @@ struct NativeGaussianRenderer::Impl {
     VmaAllocator allocator;
     NativeBufferCounts counts;
     NativeRadixSort sorter;
-    NativeRenderTargets targets;
+    NativeFrameOutput output;
+    const NativeRenderTargets& targets;
     std::unique_ptr<NativeTileRaster> tiler;
     std::optional<std::array<std::size_t, 5>> rejectedTile;
     std::string shaderDirectory;
@@ -164,16 +144,8 @@ struct NativeGaussianRenderer::Impl {
     NativePipeline rasterDepth;
     NativePipeline rasterNormals;
     NativePipeline rasterDepthNormals;
-    NativePipeline compose;
-    NativePipeline composeFloat;
-    VkSampler sampler = VK_NULL_HANDLE;
-    VkCommandPool commands = VK_NULL_HANDLE;
+    NativeFrameCommands frameCommands;
     VkCommandBuffer command = VK_NULL_HANDLE;
-    VkFence fence = VK_NULL_HANDLE;
-    VkQueryPool queries = VK_NULL_HANDLE;
-    VkQueryPool statisticsQueries = VK_NULL_HANDLE;
-    double timestampPeriod = 0;
-    std::uint64_t timestampMask = 0;
     NativeBuffer positions;
     NativeBuffer projectionSettings;
     NativeBuffer orientations;
@@ -186,25 +158,19 @@ struct NativeGaussianRenderer::Impl {
     NativeBuffer staging;
     NativeBuffer counter;
     NativeBuffer counterReadback;
-    NativeBuffer pixelReadback;
     std::shared_ptr<const StaticScene> scene;
     GaussianTemporalView temporal;
-    std::shared_ptr<const FrameCapture> capture;
     std::size_t targetCount = 0;
     std::size_t uploadedCount = 0;
     std::uint64_t uploads = 0;
-    std::uint64_t pixelReadbacks = 0;
     Clock::time_point lastCounterSample;
 
     Impl(DeviceContext c, VmaAllocator a, std::string_view directory)
         : context(c), allocator(a), sorter(c, a, counts, directory, NativeSortMode::VisibleDepths),
-          targets(c, a), shaderDirectory(directory) {
+          output(c, a, counts, directory), targets(output.targets()), shaderDirectory(directory),
+          frameCommands(c) {
         try {
-            createCommands();
-            createSampler();
             createPipelines(directory);
-            createQueries();
-            createStatisticsQueries();
         } catch (...) {
             destroy();
             throw;
@@ -225,8 +191,7 @@ struct NativeGaussianRenderer::Impl {
                              &visibility,
                              &staging,
                              &counter,
-                             &counterReadback,
-                             &pixelReadback}) {
+                             &counterReadback}) {
             destroyBuffer(allocator, *buffer);
         }
         for (auto* pipeline : {&projection,
@@ -235,42 +200,9 @@ struct NativeGaussianRenderer::Impl {
                                &raster,
                                &rasterDepth,
                                &rasterNormals,
-                               &rasterDepthNormals,
-                               &compose,
-                               &composeFloat}) {
+                               &rasterDepthNormals}) {
             destroyPipeline(context, *pipeline);
         }
-        vkDestroyQueryPool(context.device, queries, nullptr);
-        vkDestroyQueryPool(context.device, statisticsQueries, nullptr);
-        vkDestroyFence(context.device, fence, nullptr);
-        vkDestroyCommandPool(context.device, commands, nullptr);
-        vkDestroySampler(context.device, sampler, nullptr);
-    }
-
-    void createCommands() {
-        auto pool = vkInfo<VkCommandPoolCreateInfo>(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO);
-        pool.queueFamilyIndex = context.queueFamily;
-        pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        vkCheck(vkCreateCommandPool(context.device, &pool, nullptr, &commands), "vkCreateCommandPool native");
-        auto allocation = vkInfo<VkCommandBufferAllocateInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
-        allocation.commandPool = commands;
-        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocation.commandBufferCount = 1;
-        vkCheck(vkAllocateCommandBuffers(context.device, &allocation, &command),
-                "vkAllocateCommandBuffers native");
-        auto info = vkInfo<VkFenceCreateInfo>(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO);
-        vkCheck(vkCreateFence(context.device, &info, nullptr, &fence), "vkCreateFence native");
-    }
-
-    void createSampler() {
-        auto info = vkInfo<VkSamplerCreateInfo>(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
-        info.magFilter = VK_FILTER_NEAREST;
-        info.minFilter = VK_FILTER_NEAREST;
-        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        vkCheck(vkCreateSampler(context.device, &info, nullptr, &sampler), "vkCreateSampler native");
     }
 
     void createGraphicsPipeline(std::string_view directory,
@@ -366,20 +298,6 @@ struct NativeGaussianRenderer::Impl {
             "vkCreateGraphicsPipelines native");
     }
 
-    void createComposePipeline(std::string_view directory, NativePipeline& pipeline, bool withFloat) {
-        const std::array types{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                               VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                               VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-        createNativeCompute(context,
-                            pipeline,
-                            directory,
-                            withFloat ? "native_compose_float.comp.spv" : "native_compose.comp.spv",
-                            std::span(types).first(withFloat ? 5 : 2),
-                            sizeof(ComposeParameters));
-    }
-
     void createPipelines(std::string_view directory) {
         createNativeCompute(
             context, projection, directory, "native_project.comp.spv", 4, sizeof(ProjectParameters));
@@ -387,8 +305,6 @@ struct NativeGaussianRenderer::Impl {
             context, shading, directory, "native_shading.comp.spv", 1, sizeof(ProjectParameters));
         createGraphicsPipeline(directory, raster, false);
         createGraphicsPipeline(directory, rasterDepth, true);
-        createComposePipeline(directory, compose, false);
-        createComposePipeline(directory, composeFloat, true);
     }
 
     void ensureNormals() {
@@ -422,38 +338,6 @@ struct NativeGaussianRenderer::Impl {
         }
     }
 
-    void createQueries() {
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
-        timestampPeriod = properties.limits.timestampPeriod;
-        std::uint32_t count = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &count, nullptr);
-        std::vector<VkQueueFamilyProperties> queues(count);
-        vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &count, queues.data());
-        const auto bits = queues[context.queueFamily].timestampValidBits;
-        if (!bits || !timestampPeriod) {
-            return;
-        }
-        timestampMask =
-            bits == 64 ? std::numeric_limits<std::uint64_t>::max() : (std::uint64_t{1} << bits) - 1;
-        auto info = vkInfo<VkQueryPoolCreateInfo>(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
-        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        info.queryCount = timestampCount;
-        vkCheck(vkCreateQueryPool(context.device, &info, nullptr, &queries), "vkCreateQueryPool native");
-    }
-
-    void createStatisticsQueries() {
-        if (!context.pipelineStatisticsEnabled) {
-            return;
-        }
-        auto info = vkInfo<VkQueryPoolCreateInfo>(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
-        info.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
-        info.queryCount = 1;
-        info.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
-        vkCheck(vkCreateQueryPool(context.device, &info, nullptr, &statisticsQueries),
-                "vkCreateQueryPool fragment statistics");
-    }
-
     std::size_t positionStride() const { return positionBytes * (temporal.active() ? 2 : 1); }
 
     std::size_t harmonicStride() const {
@@ -483,7 +367,7 @@ struct NativeGaussianRenderer::Impl {
         }
         temporal = nextTemporal;
         if (changed || timeChanged) {
-            capture.reset();
+            output.invalidateCapture();
         }
         return changed || timeChanged;
     }
@@ -560,16 +444,6 @@ struct NativeGaussianRenderer::Impl {
                       VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                       NativeHostAccess::Readback,
                       counts);
-    }
-
-    void begin() {
-        vkCheck(vkResetCommandPool(context.device, commands, 0), "vkResetCommandPool native");
-        auto info = vkInfo<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
-        info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkCheck(vkBeginCommandBuffer(command, &info), "vkBeginCommandBuffer native");
-        if (queries) {
-            vkCmdResetQueryPool(command, queries, 0, timestampCount);
-        }
     }
 
     void packPosition(std::byte* output, std::size_t source) const {
@@ -695,19 +569,13 @@ struct NativeGaussianRenderer::Impl {
         return result;
     }
 
-    void stamp(std::uint32_t index) {
-        if (queries) {
-            vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, queries, index);
-        }
-    }
-
     void project(const FrameState& frame, const CameraView& camera, bool diagnostics) {
         const ProjectionSettings settings{camera.intrinsics,
                                           {camera.depthRange[0],
                                            camera.depthRange[1],
                                            float(camera.projection == CameraProjection::Orthographic),
                                            0}};
-        stamp(0);
+        frameCommands.stamp(Stamp::ProjectionBegin);
         vkCmdUpdateBuffer(command, projectionSettings.handle, 0, sizeof(settings), &settings);
         if (diagnostics) {
             vkCmdFillBuffer(command, counter.handle, 0, projectionCounterBytes, 0);
@@ -740,7 +608,7 @@ struct NativeGaussianRenderer::Impl {
                             VK_ACCESS_SHADER_WRITE_BIT,
                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        stamp(1);
+        frameCommands.stamp(Stamp::ProjectionEnd);
     }
 
     void shade(const FrameState& frame, const CameraView& camera, bool diagnostics) {
@@ -764,8 +632,8 @@ struct NativeGaussianRenderer::Impl {
     }
 
     void rasterize(const FrameState& frame, bool statistics) {
-        const bool collect = statistics && statisticsQueries;
-        if (collect) {
+        const auto statisticsQueries = frameCommands.fragmentQuery(statistics);
+        if (statisticsQueries) {
             vkCmdResetQueryPool(command, statisticsQueries, 0, 1);
             vkCmdBeginQuery(command, statisticsQueries, 0, 0);
         }
@@ -801,11 +669,7 @@ struct NativeGaussianRenderer::Impl {
         vkCmdSetViewport(command, 0, 1, &viewport);
         vkCmdSetScissor(command, 0, 1, &scissor);
         if (tiler) {
-            vkCmdDrawIndirect(command,
-                              tiler->fallbackArguments().handle,
-                              NativeTileRaster::fallbackOffset,
-                              1,
-                              sizeof(VkDrawIndirectCommand));
+            tiler->recordFallbackDraw(command);
         } else {
             vkCmdDrawIndirect(command,
                               visibility.handle,
@@ -814,140 +678,23 @@ struct NativeGaussianRenderer::Impl {
                               sizeof(VkDrawIndirectCommand));
         }
         vkCmdEndRenderPass(command);
-        if (collect) {
+        if (statisticsQueries) {
             vkCmdEndQuery(command, statisticsQueries, 0);
         }
         if (tiler) {
             tiler->recordRaster(command, frame, rasterInput(), targets, statistics);
         }
-        stamp(5);
+        frameCommands.stamp(Stamp::RasterEnd);
     }
 
-    void makeWritable(VkImage image, bool initialized) {
-        auto barrier =
-            imageBarrier(image,
-                         initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-                         VK_IMAGE_LAYOUT_GENERAL);
-        barrier.srcAccessMask = initialized ? VK_ACCESS_SHADER_READ_BIT : 0;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        nativeImageBarrier(command,
-                           initialized ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
-                                       : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                           barrier);
-    }
-
-    void bindComposeImages(const NativePipeline& pipeline, VkImageView display, bool withFloat) {
-        const auto& fallback = targets.colorAlpha.resource.image ? targets.colorAlpha : targets.depth;
-        const auto& color = targets.colorAlpha.resource.image ? targets.colorAlpha : fallback;
-        const auto& depth = targets.depth.resource.image ? targets.depth : fallback;
-        const auto depthSource =
-            targets.hasDepth() ? targets.depthAccum.resource.view : targets.colorAccum.resource.view;
-        const std::array<VkDescriptorImageInfo, 5> infos{
-            {{sampler, targets.colorAccum.resource.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-             {VK_NULL_HANDLE, display, VK_IMAGE_LAYOUT_GENERAL},
-             {VK_NULL_HANDLE, color.resource.view, VK_IMAGE_LAYOUT_GENERAL},
-             {sampler, depthSource, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-             {VK_NULL_HANDLE, depth.resource.view, VK_IMAGE_LAYOUT_GENERAL}}};
-        std::array<VkWriteDescriptorSet, 5> writes{};
-        const std::uint32_t count = withFloat ? 5 : 2;
-        for (std::uint32_t i = 0; i < count; ++i) {
-            writes[i] = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-            writes[i].dstBinding = i;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = (i == 0 || i == 3) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                                                          : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            writes[i].pImageInfo = &infos[i];
-        }
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle);
-        vkCmdPushDescriptorSetKHR(
-            command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout, 0, count, writes.data());
-    }
-
-    void composeImage(const FrameState& frame, VkImage image, VkImageView view, bool initialized) {
-        makeWritable(image, initialized);
-        RenderOutput outputs = RenderOutput::Display;
-        for (auto* target : {&targets.colorAlpha, &targets.depth}) {
-            if (target->resource.image) {
-                makeWritable(target->resource.image, target->hasContent);
-                outputs = outputs |
-                          (target == &targets.depth ? RenderOutput::Depth : RenderOutput::FloatColorAlpha);
-            }
-        }
-        const bool withFloat = outputs != RenderOutput::Display;
-        const auto& pipeline = withFloat ? composeFloat : compose;
-        bindComposeImages(pipeline, view, withFloat);
-        ComposeParameters settings{};
-        std::copy(frame.renderSettings.background.begin(),
-                  frame.renderSettings.background.end(),
-                  settings.background.begin());
-        settings.controls[0] = std::uint32_t(outputs);
-        vkCmdPushConstants(
-            command, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(settings), &settings);
-        vkCmdDispatch(command,
-                      (frame.width + composeGroupSize - 1) / composeGroupSize,
-                      (frame.height + composeGroupSize - 1) / composeGroupSize,
-                      1);
-        stamp(6);
-    }
-
-    VkImage captureImage(RenderOutput output, VkImage display) const {
-        if (output == RenderOutput::Display) {
-            return display;
-        }
-        if (output == RenderOutput::Normals) {
-            return targets.normals.resource.image;
-        }
-        return output == RenderOutput::Depth ? targets.depth.resource.image
-                                             : targets.colorAlpha.resource.image;
-    }
-
-    void recordCapture(const FrameState& frame, VkImage display, const NativeCapturePlan& plan) {
-        for (std::size_t i = 0; i < plan.count; ++i) {
-            const auto& plane = plan.planes[i];
-            const auto image = captureImage(plane.output, display);
-            const bool normals = plane.output == RenderOutput::Normals;
-            auto barrier =
-                imageBarrier(image,
-                             normals ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
-                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            barrier.srcAccessMask =
-                VK_ACCESS_SHADER_WRITE_BIT | (normals ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0);
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            nativeImageBarrier(command,
-                               normals ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
-                                       : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               barrier);
-            VkBufferImageCopy copy{};
-            copy.bufferOffset = plane.offset;
-            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            copy.imageExtent = {frame.width, frame.height, 1};
-            vkCmdCopyImageToBuffer(
-                command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pixelReadback.handle, 1, &copy);
-        }
-    }
-
-    void makeReadable(VkImage image, bool captured) {
-        auto barrier = imageBarrier(image,
-                                    captured ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
-                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        barrier.srcAccessMask = captured ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        nativeImageBarrier(command,
-                           captured ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                           barrier);
-    }
-
-    void finishRecording(VkImage image, bool sampled, RenderOutput captured) {
+    void recordReadbacks(bool sampled, bool captured) {
         if (sampled) {
             nativeMemoryBarrier(command,
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 VK_ACCESS_SHADER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                                 VK_ACCESS_TRANSFER_READ_BIT);
-            if (std::uint32_t(captured)) {
+            if (captured) {
                 const VkBufferCopy copy{0, 0, projectionCounterBytes};
                 vkCmdCopyBuffer(command, counter.handle, counterReadback.handle, 1, &copy);
             }
@@ -957,101 +704,13 @@ struct NativeGaussianRenderer::Impl {
                 tiler->recordTelemetry(command);
             }
         }
-        if (sampled || std::uint32_t(captured)) {
+        if (sampled || captured) {
             nativeMemoryBarrier(command,
                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                                 VK_ACCESS_TRANSFER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_HOST_BIT,
                                 VK_ACCESS_HOST_READ_BIT);
         }
-        makeReadable(image, hasOutput(captured, RenderOutput::Display));
-        for (auto* target : {&targets.colorAlpha, &targets.depth}) {
-            if (!target->resource.image) {
-                continue;
-            }
-            const auto plane = target == &targets.depth ? RenderOutput::Depth : RenderOutput::FloatColorAlpha;
-            makeReadable(target->resource.image, hasOutput(captured, plane));
-            target->resource.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        }
-        if (targets.hasNormals()) {
-            if (hasOutput(captured, RenderOutput::Normals)) {
-                makeReadable(targets.normals.resource.image, true);
-            }
-            targets.normals.resource.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        }
-        vkCheck(vkEndCommandBuffer(command), "vkEndCommandBuffer native");
-    }
-
-    double submitAndWait() {
-        vkCheck(vkResetFences(context.device, 1, &fence), "vkResetFences native");
-        auto info = vkInfo<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
-        info.commandBufferCount = 1;
-        info.pCommandBuffers = &command;
-        vkCheck(vkQueueSubmit(context.queue, 1, &info, fence), "vkQueueSubmit native");
-        const auto start = Clock::now();
-        vkCheck(vkWaitForFences(context.device, 1, &fence, VK_TRUE, fenceWaitNs), "vkWaitForFences native");
-        return milliseconds(start);
-    }
-
-    void readTicks(std::uint32_t first, std::span<std::uint64_t> values) {
-        vkCheck(vkGetQueryPoolResults(context.device,
-                                      queries,
-                                      first,
-                                      static_cast<std::uint32_t>(values.size()),
-                                      values.size_bytes(),
-                                      values.data(),
-                                      sizeof(values[0]),
-                                      VK_QUERY_RESULT_64_BIT),
-                "vkGetQueryPoolResults native");
-    }
-
-    void readTileTimings(BackendStats& stats,
-                         const std::array<std::uint64_t, frameTimestampCount>& frame,
-                         bool captured) {
-        if (!tiler || !captured) {
-            return;
-        }
-        std::array<std::uint64_t, tileTimestampCount> phases{};
-        readTicks(frameTimestampCount, phases);
-        const std::array ticks{frame[3], phases[0], phases[1], phases[2], phases[3], frame[4]};
-        const auto interval = [&](std::size_t i) {
-            return double((ticks[i + 1] - ticks[i]) & timestampMask) * timestampPeriod / 1'000'000.;
-        };
-        stats.tileStageTimings =
-            TileStageTimings{interval(0), interval(1), interval(2), interval(3), interval(4)};
-    }
-
-    void readTimestamps(const FrameState& state, FrameReport& report, bool captured) {
-        auto& frame = report.frame;
-        report.backend.tileStageTimings.reset();
-        frame.projectionGpuMs.reset();
-        frame.shadingGpuMs.reset();
-        frame.sortingGpuMs.reset();
-        frame.binningGpuMs.reset();
-        frame.rasterGpuMs.reset();
-        frame.composeGpuMs.reset();
-        frame.gpuRenderMs.reset();
-        if (!queries) {
-            return;
-        }
-        std::array<std::uint64_t, frameTimestampCount> values{};
-        readTicks(0, values);
-        readTileTimings(report.backend, values, captured);
-        const auto interval = [&](std::size_t i) {
-            return double((values[i + 1] - values[i]) & timestampMask) * timestampPeriod / 1'000'000.;
-        };
-        frame.projectionGpuMs = interval(0);
-        if (state.renderSettings.separateShading &&
-            state.renderSettings.attributeView == AttributeView::Normal) {
-            frame.shadingGpuMs = interval(1);
-        }
-        frame.sortingGpuMs = interval(2);
-        if (tiler) {
-            frame.binningGpuMs = interval(3);
-        }
-        frame.rasterGpuMs = interval(4);
-        frame.composeGpuMs = interval(5);
-        frame.gpuRenderMs = interval(0) + interval(1) + interval(2) + interval(3) + interval(4);
     }
 
     void readProjectionCounters(BackendStats& stats, bool diagnostics) {
@@ -1072,31 +731,13 @@ struct NativeGaussianRenderer::Impl {
         }
     }
 
-    void readStatistics(BackendStats& stats, bool captured) {
-        stats.fragmentShaderInvocations.reset();
-        if (!captured || !statisticsQueries) {
-            return;
-        }
-        std::uint64_t invocations = 0;
-        vkCheck(vkGetQueryPoolResults(context.device,
-                                      statisticsQueries,
-                                      0,
-                                      1,
-                                      sizeof(invocations),
-                                      &invocations,
-                                      sizeof(invocations),
-                                      VK_QUERY_RESULT_64_BIT),
-                "read fragment statistics");
-        stats.fragmentShaderInvocations = invocations;
-    }
-
     void readResults(const FrameState& frame,
                      FrameReport& report,
                      bool sample,
                      const NativeCapturePlan& plan) {
         const auto start = Clock::now();
-        readTimestamps(frame, report, plan.count != 0);
-        readStatistics(report.backend, plan.count != 0);
+        frameCommands.readTimestamps(frame, report, bool(tiler), plan.count != 0);
+        frameCommands.readStatistics(report.backend, plan.count != 0);
         report.backend.independentlyProjectedGaussians.reset();
         report.backend.projectionDiagnostics.reset();
         if (sample) {
@@ -1109,12 +750,7 @@ struct NativeGaussianRenderer::Impl {
         }
         report.backend.telemetryAgeMs = milliseconds(lastCounterSample);
         report.frame.queryReadbackCpuMs = milliseconds(start);
-        if (plan.count) {
-            vkCheck(vmaInvalidateAllocation(allocator, pixelReadback.allocation, 0, plan.bytes),
-                    "vmaInvalidateAllocation native pixels");
-            capture = nativeReadCapture(frame, plan, pixelReadback.mapped);
-            pixelReadbacks += plan.count;
-        }
+        output.readCapture(frame, plan);
     }
 
     void fillReport(const FrameState& state, FrameReport& report) const {
@@ -1124,9 +760,8 @@ struct NativeGaussianRenderer::Impl {
         frame.budgetedGaussians = targetCount;
         frame.refining = uploadedCount < targetCount;
         frame.sceneUploads = uploads;
-        frame.pixelReadbacks = pixelReadbacks;
         frame.orbitDegrees = std::fmod(state.camera.yawDegrees + fullTurnDegrees, fullTurnDegrees);
-        frame.capture = capture;
+        output.fillCaptureStats(frame);
         frame.temporalEvaluationCpuMs.reset();
         auto& stats = report.backend;
         stats.tileAllocationFallback = rejectedTile.has_value();
@@ -1153,7 +788,7 @@ struct NativeGaussianRenderer::Impl {
         stats.sortingBytes = keys.capacity + indices.capacity + visibility.capacity + sorter.bytes() +
                              (tiler ? tiler->workspaceBytes() : 0);
         stats.pixelBytes = targets.bytes();
-        stats.telemetryBytes = counter.capacity + counterReadback.capacity + pixelReadback.capacity +
+        stats.telemetryBytes = counter.capacity + counterReadback.capacity + output.telemetryBytes() +
                                (tiler ? tiler->telemetryBytes() : 0);
         stats.gsReservedBytes = stats.modelBytes + stats.preprocessingBytes + stats.sortingBytes +
                                 stats.pixelBytes + stats.telemetryBytes;
@@ -1202,32 +837,14 @@ struct NativeGaussianRenderer::Impl {
         return created;
     }
 
-    void reserveCapture(const FrameState& frame, const NativeCapturePlan& plan) {
-        if (!plan.count) {
-            return;
-        }
-        if (pixelReadback.capacity > frame.captureBudgetBytes) {
-            destroyBuffer(allocator, pixelReadback);
-        }
-        reserveBuffer(allocator,
-                      pixelReadback,
-                      plan.bytes,
-                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                      NativeHostAccess::Readback,
-                      counts);
-    }
-
     void reserveMandatoryStorage(const FrameState& frame,
                                  const NativeCapturePlan& capturePlan,
                                  FrameReport& report) {
         ensureBuffers();
-        targets.ensure(frame,
-                       frame.renderSettings.outputs |
-                           (capturePlan.count ? frame.captureOutputs : RenderOutput(0)),
-                       report);
+        output.reserveTargets(frame, capturePlan.count != 0, report);
         ensureNormals();
         reserveUpload(frame);
-        reserveCapture(frame, capturePlan);
+        output.reserveCapture(frame, capturePlan);
     }
 
     void reserveFrameStorage(const FrameState& frame,
@@ -1252,9 +869,7 @@ struct NativeGaussianRenderer::Impl {
         PreparedFrame prepared{};
         prepared.camera = cameraView(frame.camera, frame.width, frame.height);
         const bool changed = ensureScene(frame, nextTemporal);
-        const bool pending =
-            frame.captureRequestId && (!capture || capture->requestId != frame.captureRequestId ||
-                                       capture->outputs != frame.captureOutputs);
+        const bool pending = output.capturePending(frame);
         if (pending) {
             prepared.capture = nativeCapturePlan(frame);
         }
@@ -1278,34 +893,32 @@ struct NativeGaussianRenderer::Impl {
                 bool initialized,
                 FrameReport& report) {
         const auto prepared = prepareFrame(frame, nextTemporal, report);
+        const bool captured = prepared.capture.count != 0;
         const auto previousUpload = uploadedCount;
         try {
-            begin();
+            command = frameCommands.begin();
             upload(frame);
-            project(frame, prepared.camera, prepared.capture.count != 0);
-            shade(frame, prepared.camera, prepared.capture.count != 0);
-            stamp(2);
+            project(frame, prepared.camera, captured);
+            shade(frame, prepared.camera, captured);
+            frameCommands.stamp(Stamp::ShadingEnd);
             sorter.record(command,
                           static_cast<std::uint32_t>(uploadedCount),
                           keys,
                           indices,
                           &visibility,
                           positiveDepthKeyBits);
-            stamp(3);
+            frameCommands.stamp(Stamp::SortEnd);
             if (tiler) {
-                tiler->recordBinning(
-                    command,
-                    frame,
-                    rasterInput(),
-                    {prepared.capture.count ? queries : VK_NULL_HANDLE, frameTimestampCount});
+                tiler->recordBinning(command, frame, rasterInput(), frameCommands.tileQueries(captured));
             }
-            stamp(4);
-            rasterize(frame, prepared.capture.count != 0);
-            composeImage(frame, image, view, initialized);
-            recordCapture(frame, image, prepared.capture);
-            finishRecording(
-                image, prepared.sample, prepared.capture.count ? frame.captureOutputs : RenderOutput(0));
-            report.frame.backendWaitMs = submitAndWait();
+            frameCommands.stamp(Stamp::BinningEnd);
+            rasterize(frame, captured);
+            output.composeImage(command, frame, {image, view, initialized});
+            frameCommands.stamp(Stamp::CompositionEnd);
+            output.recordCapture(command, frame, image, prepared.capture);
+            recordReadbacks(prepared.sample, captured);
+            output.publishLayouts(command, image, captured ? frame.captureOutputs : RenderOutput(0));
+            report.frame.backendWaitMs = frameCommands.submitAndWait();
         } catch (...) {
             uploadedCount = previousUpload;
             throw;
@@ -1313,9 +926,7 @@ struct NativeGaussianRenderer::Impl {
         if (temporal.active() && previousUpload != uploadedCount && uploadedCount == targetCount) {
             destroyBuffer(allocator, staging);
         }
-        for (auto* target : {&targets.colorAlpha, &targets.depth, &targets.normals}) {
-            target->hasContent = target->resource.image != VK_NULL_HANDLE;
-        }
+        output.completeSubmission();
         readResults(frame, report, prepared.sample, prepared.capture);
         fillReport(frame, report);
     }

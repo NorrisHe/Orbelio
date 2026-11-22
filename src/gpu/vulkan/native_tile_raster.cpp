@@ -439,7 +439,7 @@ void NativeTileRaster::transitionTargets(VkCommandBuffer command,
 void NativeTileRaster::recordRaster(VkCommandBuffer command,
                                     const FrameState& frame,
                                     NativeRasterInput input,
-                                    NativeRenderTargets& targets,
+                                    const NativeRenderTargets& targets,
                                     bool diagnostics) {
     transitionTargets(command, targets, true);
     const bool macro = frame.renderSettings.tileBinningWidth > tileWidth;
@@ -450,6 +450,10 @@ void NativeTileRaster::recordRaster(VkCommandBuffer command,
     vkCmdPushConstants(command, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(settings), &settings);
     vkCmdDispatchIndirect(command, control_.handle, rasterDispatchOffset);
     transitionTargets(command, targets, false);
+}
+
+void NativeTileRaster::recordFallbackDraw(VkCommandBuffer command) const {
+    vkCmdDrawIndirect(command, control_.handle, sizeof(NativeSortControl), 1, sizeof(VkDrawIndirectCommand));
 }
 
 void NativeTileRaster::recordTelemetry(VkCommandBuffer command) {

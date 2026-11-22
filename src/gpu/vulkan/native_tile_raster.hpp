@@ -1,25 +1,11 @@
 #pragma once
 #include "native_radix_sort.hpp"
+#include "native_raster_input.hpp"
 #include "native_render_targets.hpp"
 
 namespace orbelio {
-struct NativeRasterInput {
-    const NativeBuffer& projected;
-    const NativeBuffer& keys;
-    const NativeBuffer& indices;
-    std::uint32_t count;
-    const NativeBuffer* visibility = nullptr;
-    const NativeBuffer* normals = nullptr;
-};
-
-struct NativeTileQueries {
-    VkQueryPool pool = VK_NULL_HANDLE;
-    std::uint32_t first = 0;
-};
-
 class NativeTileRaster {
 public:
-    static constexpr VkDeviceSize fallbackOffset = sizeof(NativeSortControl);
     NativeTileRaster(DeviceContext context,
                      VmaAllocator allocator,
                      NativeBufferCounts& counts,
@@ -35,7 +21,7 @@ public:
     void recordRaster(VkCommandBuffer command,
                       const FrameState& frame,
                       NativeRasterInput input,
-                      NativeRenderTargets& targets,
+                      const NativeRenderTargets& targets,
                       bool diagnostics);
     void recordTelemetry(VkCommandBuffer command);
     void readTelemetry(bool diagnostics);
@@ -44,7 +30,7 @@ public:
 
     std::size_t telemetryBytes() const { return readback_.capacity; }
 
-    const NativeBuffer& fallbackArguments() const { return control_; }
+    void recordFallbackDraw(VkCommandBuffer command) const;
 
 private:
     struct Parameters;
