@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">Orbelio orbit mark</title>
+  <rect x="5" y="5" width="118" height="118" rx="26" fill="#0B1421" stroke="#2A4052" stroke-width="2"/>
+  <g transform="rotate(-28 64 65)">
+    <path d="M108.9 63.6 A45 26 0 1 1 86.5 42.5" fill="none" stroke="#65E7D4"
+          stroke-width="10" stroke-linecap="round"/>
+    <circle cx="100.9" cy="50.1" r="7.4" fill="#FFB479"/>
+  </g>
+</svg>
